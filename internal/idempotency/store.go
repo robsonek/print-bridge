@@ -28,8 +28,20 @@ func Open(path string, ttlDays int) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite tolerates only one writer at a time. database/sql defaults to an
+	// unbounded pool, so concurrent HTTP handlers and the cleanupLoop DELETE can
+	// land on separate connections and race -> SQLITE_BUSY ("database is locked").
+	// Pin the pool to a single connection to serialize all writes in-process.
+	db.SetMaxOpenConns(1)
 	// WAL improves concurrent read/write tolerance for the agent's single writer.
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
+		return nil, err
+	}
+	// busy_timeout: wait up to 5s for the writer lock instead of failing
+	// immediately with SQLITE_BUSY (modernc.org/sqlite applies no default).
+	// Belt-and-suspenders alongside SetMaxOpenConns(1) — also covers any
+	// out-of-process access to the same DB file.
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000;`); err != nil {
 		return nil, err
 	}
 	if _, err := db.Exec(`
@@ -66,11 +78,16 @@ func (s *Store) Get(key string) (Record, bool, error) {
 		return Record{}, false, err
 	}
 	r.Terminal = term == 1
-	if t, perr := time.Parse(time.RFC3339, created); perr == nil {
-		r.CreatedAt = t
-		if time.Since(t) > s.ttl {
-			return Record{}, false, nil
-		}
+	t, perr := time.Parse(time.RFC3339, created)
+	if perr != nil {
+		// created_at is corrupt / not RFC3339. Fail CLOSED: treat the row as
+		// expired/invalid so a malformed record cannot become an un-expiring,
+		// unremovable entry (it would otherwise skip the TTL gate forever).
+		return Record{}, false, nil
+	}
+	r.CreatedAt = t
+	if time.Since(t) > s.ttl {
+		return Record{}, false, nil
 	}
 	return r, true, nil
 }
