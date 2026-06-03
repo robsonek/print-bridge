@@ -84,13 +84,21 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID int) (Result, *apierr
 		if err != nil {
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, "job poll failed: "+err.Error(), 503)
 		}
+		// RFC 8011 §5.3.7: only completed / canceled / aborted are TERMINATING
+		// states. Everything else (pending=3, pending-held=4, processing=5,
+		// processing-stopped=6) is non-terminal => keep polling. In particular
+		// (#1) processing-stopped means the printer halted mid-job (out of paper
+		// / jam / pause) and CUPS will resume it to processing->completed once the
+		// fault clears; and (#9) pending-held means the job is held (operator hold
+		// / error-policy) and will resume on release. Aborting either of those
+		// would porzucic an odzyskiwalny job and risk a duplicate on retry.
 		switch state {
 		case JobCompleted:
 			return p.verify(ctx, jobID)
 		case JobCanceled:
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodeInvalidZPL, "job canceled by CUPS", 422)
-		case JobAborted, JobProcessingStopped:
-			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, "job aborted/stopped", 503)
+		case JobAborted:
+			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, "job aborted by CUPS", 503)
 		}
 		if p.PollInterval > 0 {
 			select {
@@ -106,10 +114,29 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID int) (Result, *apierr
 func (p *Printer) verify(ctx context.Context, jobID int) (Result, *apierr.Error) {
 	hs, ok, err := p.Probe.HostStatus(ctx)
 	id := strconv.Itoa(jobID)
-	if err != nil || !ok {
-		// Graceful degrade: printer doesn't speak ~HS -> best-effort printed.
+
+	// #2: split two materially different ~HS probe outcomes that used to share
+	// one branch.
+	//
+	// err != nil  => TRANSPORT failure (dial/write/read fail): the printer became
+	// UNREACHABLE between CUPS JobCompleted (bytes flushed to the socket buffer)
+	// and this ~HS probe. The socket:9100 backend gives CUPS no physical-print
+	// back-channel, so the physical print state is UNKNOWN -> we must NOT claim
+	// "printed". Return retryable PRINTER_OFFLINE; resume-by-key + a completed
+	// CUPS job mean a retry will re-verify via ~HS (without reprinting) once the
+	// printer is back.
+	if err != nil {
+		return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline,
+			"printer unreachable during ~HS verification: "+err.Error(), 503)
+	}
+
+	// err == nil && !ok => the printer ANSWERED but the ~HS reply was unparseable
+	// / unsupported. The printer is alive and reachable, it just doesn't speak ~HS
+	// intelligibly -> graceful degrade to best-effort "printed" (as designed).
+	if !ok {
 		return Result{Status: "printed", CUPSJobID: id}, nil
 	}
+
 	switch {
 	case hs.PaperOut:
 		return Result{CUPSJobID: id}, apierr.New(apierr.CodeOutOfPaper, "printer reports media-empty (~HS)", 503)

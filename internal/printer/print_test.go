@@ -9,17 +9,17 @@ import (
 )
 
 type fakeBackend struct {
-	reachable  bool
-	paused     bool
-	states     []int // returned in sequence by JobState
-	idx        int
-	hs         HostStatus
-	hsOK       bool
-	hsErr      error
-	submitErr  error
-	rendered   []byte
-	renderErr  error
-	submitted  []byte
+	reachable bool
+	paused    bool
+	states    []int // returned in sequence by JobState
+	idx       int
+	hs        HostStatus
+	hsOK      bool
+	hsErr     error
+	submitErr error
+	rendered  []byte
+	renderErr error
+	submitted []byte
 }
 
 func (f *fakeBackend) Reachable(context.Context) (bool, error)   { return f.reachable, nil }
@@ -119,8 +119,10 @@ func TestPrintPaperOutAfterCompletion(t *testing.T) {
 }
 
 func TestPrintHSUnsupportedDegradesToPrinted(t *testing.T) {
-	// ~HS returns ok=false (printer doesn't speak it) -> graceful degrade.
-	f := &fakeBackend{reachable: true, states: []int{JobCompleted}, hsOK: false, hsErr: errors.New("no reply")}
+	// #2: ~HS reachable but reply unparseable (ok=false, err=nil) -> the printer
+	// IS alive, it just doesn't speak ~HS intelligibly -> graceful best-effort
+	// "printed". This is the ONLY case that may degrade.
+	f := &fakeBackend{reachable: true, states: []int{JobCompleted}, hsOK: false, hsErr: nil}
 	p := newPrinter(f)
 	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
 	if e != nil {
@@ -128,6 +130,78 @@ func TestPrintHSUnsupportedDegradesToPrinted(t *testing.T) {
 	}
 	if res.Status != "printed" {
 		t.Errorf("status = %q, want printed (best-effort)", res.Status)
+	}
+}
+
+// #2 regression: transport-error at verify time (dial/write/read fail) means the
+// printer became UNREACHABLE between CUPS JobCompleted and the ~HS probe. The
+// physical print is UNKNOWN -> must NOT degrade to "printed". Return retryable
+// PRINTER_OFFLINE so resume-by-key re-verifies (without reprinting) once back.
+func TestPrintHSTransportErrorIsPrinterOffline(t *testing.T) {
+	f := &fakeBackend{reachable: true, states: []int{JobCompleted}, hsOK: false, hsErr: errors.New("dial timeout")}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodePrinterOffline {
+		t.Fatalf("want PRINTER_OFFLINE on ~HS transport error, got err=%v", e)
+	}
+	if res.Status == "printed" {
+		t.Errorf("must NOT claim printed on transport error, got %+v", res)
+	}
+	if res.CUPSJobID != "7" {
+		t.Errorf("offline Result must carry submitted job id 7, got %q", res.CUPSJobID)
+	}
+}
+
+// #1 regression: JobProcessingStopped (IPP state 6) is NOT terminal (RFC 8011).
+// Printer halted (paper/jam/pause); CUPS resumes to processing->completed once
+// the fault clears. A [6,6,9] sequence must keep polling and end as "printed",
+// NOT abort with CUPS_UNAVAILABLE.
+func TestPrintProcessingStoppedKeepsPolling(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobProcessingStopped, JobProcessingStopped, JobCompleted},
+		hsOK:      true,
+	}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e != nil {
+		t.Fatalf("state 6 must not abort; want printed, got err %v", e)
+	}
+	if res.Status != "printed" {
+		t.Errorf("status = %q, want printed after stop->completed", res.Status)
+	}
+}
+
+// #9 regression: JobPendingHeld (IPP state 4) is non-terminal -> keep polling
+// (per project decision) rather than aborting. A [4,4,9] sequence ends printed.
+func TestPrintPendingHeldKeepsPolling(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobPendingHeld, JobPendingHeld, JobCompleted},
+		hsOK:      true,
+	}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e != nil {
+		t.Fatalf("state 4 must not abort; want printed, got err %v", e)
+	}
+	if res.Status != "printed" {
+		t.Errorf("status = %q, want printed after held->completed", res.Status)
+	}
+}
+
+// #1: a job stuck in processing-stopped for the whole confirm window must NOT
+// abort -> it exhausts the poll budget and returns retryable PRINT_TIMEOUT
+// (resume-by-key protects against a duplicate on retry).
+func TestPrintProcessingStoppedExhaustsToTimeout(t *testing.T) {
+	f := &fakeBackend{reachable: true, states: []int{JobProcessingStopped}, hsOK: true}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodePrintTimeout {
+		t.Fatalf("want PRINT_TIMEOUT when stop persists, got err=%v", e)
+	}
+	if res.CUPSJobID != "7" {
+		t.Errorf("timeout Result must carry submitted job id 7, got %q", res.CUPSJobID)
 	}
 }
 

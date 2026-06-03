@@ -15,20 +15,20 @@ import (
 
 // IPP job-state values (RFC 8011 §5.3.7).
 const (
-	JobPending          = 3
-	JobPendingHeld      = 4
-	JobProcessing       = 5
+	JobPending           = 3
+	JobPendingHeld       = 4
+	JobProcessing        = 5
 	JobProcessingStopped = 6
-	JobCanceled         = 7
-	JobAborted          = 8
-	JobCompleted        = 9
+	JobCanceled          = 7
+	JobAborted           = 8
+	JobCompleted         = 9
 )
 
 // CUPSClient submits raw jobs via `lp -o raw` and polls job-state via IPP.
 type CUPSClient struct {
-	queue   string
-	ippURL  string // http://localhost:631/printers/<queue>
-	httpc   *http.Client
+	queue  string
+	ippURL string // http://localhost:631/printers/<queue>
+	httpc  *http.Client
 }
 
 func NewCUPSClient(queue string) *CUPSClient {
@@ -133,5 +133,32 @@ func (c *CUPSClient) doIPP(ctx context.Context, req *goipp.Message) (*goipp.Mess
 	if err := resp.Decode(httpResp.Body); err != nil {
 		return nil, err
 	}
+	// #6: the IPP response status lives in resp.Code (goipp: "Operation for
+	// request, status for response"). Decode populates it even on error
+	// responses, so check it here. Without this, an IPP error (e.g. job purged ->
+	// client-error-not-found 0x0406, or forbidden 0x0401) returns a message with
+	// no job group; JobState's loop then finds no "job-state" and reports the
+	// misleading "job-state not found", which pollAndVerify maps to a hard
+	// CUPS_UNAVAILABLE/503 for a job that may have physically printed. Surfacing
+	// the real status here lets callers fail loudly with the precise IPP code
+	// instead of silently halting the print or returning an empty list.
+	if err := checkIPPStatus(&resp); err != nil {
+		return &resp, err
+	}
 	return &resp, nil
+}
+
+// checkIPPStatus returns nil when the IPP response status is in the success set,
+// otherwise an error carrying the numeric + named status. The success set
+// follows RFC 8011: successful-ok plus the two "ok with caveats" variants
+// (ignored-or-substituted-attributes, conflicting-attributes) which still mean
+// the operation succeeded.
+func checkIPPStatus(resp *goipp.Message) error {
+	st := goipp.Status(resp.Code)
+	switch st {
+	case goipp.StatusOk, goipp.StatusOkIgnoredOrSubstituted, goipp.StatusOkConflicting:
+		return nil
+	default:
+		return fmt.Errorf("IPP error 0x%04x %s", uint16(resp.Code), st)
+	}
 }
