@@ -2,7 +2,10 @@ module github.com/robsonek/print-bridge
 
 go 1.25.0
 
-require modernc.org/sqlite v1.51.0
+require (
+	github.com/OpenPrinting/goipp v1.2.0
+	modernc.org/sqlite v1.51.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
