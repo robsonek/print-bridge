@@ -38,6 +38,12 @@ type Handlers struct {
 	Updater func(tag string) error
 }
 
+// maxBodyBytes caps the request body for body-reading handlers (#17). A thermal
+// label is tens of KB; a merged multi-parcel PDF is a few MB. 20 MB leaves ample
+// headroom while preventing a base64-amplification DoS (decoded payload then
+// expanded again by poppler -> ZPL) from exhausting a small warehouse VM's RAM.
+const maxBodyBytes = 20 << 20 // 20 MB
+
 type printJobRequest struct {
 	LabelBase64 string `json:"label_base64"`
 	PDFBase64   string `json:"pdf_base64"`
@@ -92,6 +98,10 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #17: cap the body BEFORE decoding (only reached on the fresh-print path; the
+	// resume-by-key branch above never reads the body). MaxBytesReader makes Decode
+	// fail once the limit is exceeded, which the existing error branch maps to 400.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req printJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, apierr.New(apierr.CodeInvalidRequest, "invalid JSON body", http.StatusBadRequest))
@@ -160,6 +170,7 @@ type updateRequest struct {
 }
 
 func (h *Handlers) AdminUpdate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes) // #17: DoS guard
 	var req updateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, apierr.New(apierr.CodeInvalidRequest, "invalid JSON", http.StatusBadRequest))

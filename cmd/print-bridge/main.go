@@ -2,14 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
-	"github.com/robsonek/print-bridge/internal/apierr"
 	"github.com/robsonek/print-bridge/internal/config"
 	"github.com/robsonek/print-bridge/internal/idempotency"
 	"github.com/robsonek/print-bridge/internal/printer"
@@ -40,7 +42,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("idempotency: %v", err)
 	}
-	defer store.Close()
+	// NOTE: store.Close() is NOT deferred — a deferred close never runs under the
+	// SIGTERM the agent actually receives (systemctl stop / self-update). It is
+	// called explicitly after graceful shutdown below so the WAL is checkpointed
+	// cleanly on the routine restart path (#8).
 	go cleanupLoop(store)
 
 	printerAddr := fmt.Sprintf("%s:9100", cfg.PrinterIP)
@@ -67,29 +72,107 @@ func main() {
 	srv := &http.Server{
 		Addr:    fmt.Sprintf("0.0.0.0:%d", cfg.ListenPort),
 		Handler: server.Router(h, cfg.PrintToken),
+		// #18: bounded HTTP timeouts (defense-in-depth on top of the ufw egress-CIDR
+		// restriction). ReadHeaderTimeout kills slowloris BEFORE auth/handler runs.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,  // whole request incl. base64 PDF body
+		IdleTimeout:       120 * time.Second, // keep-alive reaping
+		// WriteTimeout MUST exceed the print confirm budget: PrintJobs long-polls up
+		// to ConfirmTimeoutSec (x 1s PollInterval). +60s slack covers render/submit/
+		// verify around the loop so a legitimate long print is never cut off.
+		WriteTimeout: time.Duration(cfg.ConfirmTimeoutSec+60) * time.Second,
 	}
-	log.Printf("print-bridge %s listening on %s (queue=%s printer=%s)", version.Version, srv.Addr, cfg.CUPSQueue, printerAddr)
-	if err := srv.ListenAndServeTLS(certPath, keyPath); err != nil {
+
+	// #8: graceful shutdown. The agent is restarted via SIGTERM (systemctl stop /
+	// self-update); without a handler Go exits immediately, no defers run, and a
+	// SIGTERM mid-poll leaves no persisted state. Run the server in a goroutine and
+	// drain on SIGINT/SIGTERM, then close the store explicitly.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		log.Printf("print-bridge %s listening on %s (queue=%s printer=%s)", version.Version, srv.Addr, cfg.CUPSQueue, printerAddr)
+		if err := srv.ListenAndServeTLS(certPath, keyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			srvErr <- err
+		}
+	}()
+
+	select {
+	case err := <-srvErr:
+		// Startup/listen failure: close the store before exiting.
+		_ = store.Close()
 		log.Fatalf("server: %v", err)
+	case <-ctx.Done():
+		stop() // restore default signal handling so a second signal force-quits
+		log.Printf("shutdown signal received, draining in-flight requests...")
 	}
+
+	// Give in-flight polls (up to ConfirmTimeoutSec) time to reach SaveTerminal
+	// before the DB closes. srv.Shutdown waits for active handlers without
+	// cancelling their contexts, so a confirming print finishes cleanly.
+	shutCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ConfirmTimeoutSec+5)*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("graceful shutdown timed out: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		log.Printf("store close: %v", err)
+	}
+	log.Printf("print-bridge stopped")
 }
 
-func makeHealth(reach *printer.SocketReachability, probe *printer.HSProbe, cups *printer.CUPSClient) func(context.Context) (int, any) {
+// Small interfaces over the concrete probes so makeHealth is unit-testable (#20).
+type reachabilityProbe interface {
+	Reachable(context.Context) (bool, error)
+}
+type hostStatusProbe interface {
+	HostStatus(context.Context) (printer.HostStatus, bool, error)
+}
+type cupsReasonsProbe interface {
+	PrinterReasons(context.Context) ([]string, error)
+}
+
+func makeHealth(reach reachabilityProbe, probe hostStatusProbe, cups cupsReasonsProbe) func(context.Context) (int, any) {
 	return func(ctx context.Context) (int, any) {
 		body := map[string]any{"version": version.Version}
-		online, _ := reach.Reachable(ctx)
+
+		online, reachErr := reach.Reachable(ctx)
 		body["printer_online"] = online
-		hs, ok, _ := probe.HostStatus(ctx)
+		if reachErr != nil {
+			body["reach_error"] = reachErr.Error()
+		}
+
+		hs, ok, hsErr := probe.HostStatus(ctx)
 		if ok {
 			body["paper_out"] = hs.PaperOut
 			body["paused"] = hs.Paused
 			body["host_status"] = hs.Raw
+		} else if hsErr != nil {
+			// Distinguish a probe transport failure/timeout from "printer doesn't
+			// speak ~HS" (alive but unparseable).
+			body["host_status"] = "unavailable"
+			body["host_status_error"] = hsErr.Error()
+		} else {
+			body["host_status"] = "unsupported"
 		}
+
+		// #20: an IPP TRANSPORT error means cupsd is unreachable -> the real print
+		// path (lp -> cupsd) will fail with CUPS_UNAVAILABLE. That is a hard signal
+		// (unlike the CONTENT of printer-state-reasons, which is unreliable over a
+		// socket:9100 backend), so degrade health on it. Previously a CUPS error was
+		// silently ignored and health could report "ok" with cupsd down.
+		cupsReachable := true
 		if reasons, err := cups.PrinterReasons(ctx); err == nil {
 			body["cups_reasons"] = reasons
+		} else {
+			cupsReachable = false
+			body["cups_error"] = err.Error()
 		}
+		body["cups_reachable"] = cupsReachable
+
 		status := http.StatusOK
-		if !online || (ok && !hs.Healthy()) {
+		if !online || !cupsReachable || (ok && !hs.Healthy()) {
 			status = http.StatusServiceUnavailable
 			body["status"] = "degraded"
 		} else {
@@ -123,5 +206,3 @@ func absUnder(base, p string) string {
 	}
 	return filepath.Join(base, p)
 }
-
-var _ = apierr.CodeForbidden // keep apierr import if unused after refactor

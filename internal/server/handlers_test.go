@@ -241,6 +241,45 @@ func TestPrintJobPendingResumes(t *testing.T) {
 	}
 }
 
+// Regression (#17): a body exceeding maxBodyBytes must be rejected (400) and must
+// NOT reach Print (no Submit). MaxBytesReader makes the JSON decode fail.
+func TestPrintJobRejectsOversizedBody(t *testing.T) {
+	store := newMemStore()
+	fp := &fakePrinter{res: printer.Result{Status: "printed", CUPSJobID: "7"}}
+	h := newHandlers(fp, store)
+
+	// Build a JSON body larger than maxBodyBytes (valid JSON shape, huge field).
+	big := strings.Repeat("A", maxBodyBytes+1024)
+	body := `{"label_base64":"` + big + `"}`
+	req := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "pj:big")
+	rec := httptest.NewRecorder()
+	h.PrintJobs(rec, req)
+
+	if rec.Code != 400 {
+		t.Fatalf("oversized body must yield 400, got %d", rec.Code)
+	}
+	if fp.submitCalls.Load() != 0 {
+		t.Errorf("oversized body must NOT submit, submits=%d", fp.submitCalls.Load())
+	}
+}
+
+// A body within the limit must still print normally (limit does not break happy path).
+func TestPrintJobAcceptsBodyWithinLimit(t *testing.T) {
+	store := newMemStore()
+	fp := &fakePrinter{res: printer.Result{Status: "printed", CUPSJobID: "7"}}
+	h := newHandlers(fp, store)
+	body := `{"label_base64":"XlhBREFUQV5YWg==","copies":1}`
+	req := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "pj:small")
+	rec := httptest.NewRecorder()
+	h.PrintJobs(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("in-limit body must succeed, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	h := newHandlers(&fakePrinter{}, newMemStore())
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
