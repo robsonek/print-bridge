@@ -8,7 +8,7 @@
   "idempotency_db": "data/idempotency.db",
   "idempotency_ttl_days": 30,
   "confirm_timeout_sec": 30,
-  "label_width_mm": 104,
-  "label_height_mm": 148,
+  "label_width_mm": 102,
+  "label_height_mm": 152,
   "render_dpi": 203
 }

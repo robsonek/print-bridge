@@ -31,9 +31,11 @@ func Default() Config {
 		IdempotencyDB:      "data/idempotency.db",
 		IdempotencyTTLDays: 30,
 		ConfirmTimeoutSec:  30,
-		LabelWidthMM:       104,
-		LabelHeightMM:      148,
-		RenderDPI:          203,
+		// 4x6" courier label (101.6 x 152.4 mm) — confirmed by XP-423B Windows manual
+		// and vendor CUPS PPD (PageSize w4h6). @203dpi ≈ 812 x 1218 dots.
+		LabelWidthMM:  102,
+		LabelHeightMM: 152,
+		RenderDPI:     203,
 	}
 }
 
