@@ -1,0 +1,7 @@
+/print-bridge
+/dist/
+/data/
+config.json
+*.pem
+*.db
+.DS_Store
