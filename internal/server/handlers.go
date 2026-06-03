@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/robsonek/print-bridge/internal/apierr"
 	"github.com/robsonek/print-bridge/internal/printer"
@@ -36,6 +37,27 @@ type Handlers struct {
 	KeyLock *KeyLock
 	Health  func(context.Context) (int, any)
 	Updater func(tag string) error
+
+	// ConfirmTimeout (#27) is the server-side upper bound for the WHOLE print
+	// operation (exec lp + every JobState IPP round-trip + verify), not just the
+	// poll loop's iteration count. Without it, exec lp and each JobState inherit
+	// only r.Context() (canceled solely on client disconnect/handler return), so a
+	// hung cupsd `lp` held open by a non-timing-out client has no upper bound. We
+	// derive a child context with this deadline before calling Print/ResumeJob.
+	// It MUST exceed the healthy poll loop's real worst case
+	// (~ConfirmTimeoutPolls × (ippTimeout + PollInterval)) so a slow-but-healthy
+	// print is never cut off into a false PRINT_TIMEOUT; main sizes it accordingly.
+	ConfirmTimeout time.Duration
+}
+
+// printContext derives a child of the request context bounded by ConfirmTimeout
+// (#27). When ConfirmTimeout is 0 (unset) it falls back to the request context so
+// behavior is unchanged. The caller MUST invoke the returned cancel func.
+func (h *Handlers) printContext(r *http.Request) (context.Context, context.CancelFunc) {
+	if h.ConfirmTimeout <= 0 {
+		return context.WithCancel(r.Context())
+	}
+	return context.WithTimeout(r.Context(), h.ConfirmTimeout)
 }
 
 // maxBodyBytes caps the request body for body-reading handlers (#17). A thermal
@@ -92,7 +114,9 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, apierr.New(apierr.CodeBridgeRestarting, "pending job has no resumable cups_job_id", http.StatusServiceUnavailable))
 			return
 		}
-		res, perr := h.Printer.ResumeJob(r.Context(), jobID)
+		ctx, cancel := h.printContext(r) // #27: bound the resume/poll budget
+		defer cancel()
+		res, perr := h.Printer.ResumeJob(ctx, jobID)
 		h.persistPending(key, res)
 		h.finish(w, key, res, perr)
 		return
@@ -121,7 +145,9 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 		copies = 1
 	}
 
-	res, perr := h.Printer.Print(r.Context(), data, copies)
+	ctx, cancel := h.printContext(r) // #27: bound exec lp + poll/verify with a budget
+	defer cancel()
+	res, perr := h.Printer.Print(ctx, data, copies)
 	// Persist the cups job id whenever Print surfaced one — including post-submit
 	// error paths (#4,#11). The Result carries the job id even on a retryable error
 	// after a successful Submit, so a retry with this key RESUMES the existing job

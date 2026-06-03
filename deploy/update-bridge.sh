@@ -15,10 +15,13 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 curl -fsSL "$URL" -o "$TMP/agent.tar.gz"
-curl -fsSL "${URL}.sha256" -o "$TMP/agent.tar.gz.sha256" || true
-if [ -f "$TMP/agent.tar.gz.sha256" ]; then
-  (cd "$TMP" && sha256sum -c "agent.tar.gz.sha256")
-fi
+# #24: sha256 verification is MANDATORY, fail-closed. A missing/failed checksum
+# download (no `|| true`) or a mismatch aborts the update via `set -e` BEFORE the
+# binary is ever installed. The .sha256 is co-located with the tarball on the same
+# HTTPS host, so this guards against a corrupted/truncated download (NOT active
+# tampering — that would need an out-of-band signature, a separate larger change).
+curl -fsSL "${URL}.sha256" -o "$TMP/agent.tar.gz.sha256"
+(cd "$TMP" && sha256sum -c "agent.tar.gz.sha256")
 
 tar -xzf "$TMP/agent.tar.gz" -C "$TMP"
 systemctl stop print-bridge

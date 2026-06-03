@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/robsonek/print-bridge/internal/apierr"
 	"github.com/robsonek/print-bridge/internal/printer"
@@ -20,14 +21,33 @@ type fakePrinter struct {
 	// Counters for idempotency regression tests.
 	submitCalls atomic.Int32
 	resumeCalls atomic.Int32
+
+	// #27: capture whether the context handed to Print/ResumeJob carries an
+	// upper-bound deadline (server-side time budget), so a hung lp/JobState can
+	// never pin the operation past the configured budget.
+	mu             sync.Mutex
+	printHadDDL    bool
+	resumeHadDDL   bool
+	printDeadline  time.Time
+	resumeDeadline time.Time
 }
 
-func (f *fakePrinter) Print(context.Context, []byte, int) (printer.Result, *apierr.Error) {
+func (f *fakePrinter) Print(ctx context.Context, _ []byte, _ int) (printer.Result, *apierr.Error) {
 	f.submitCalls.Add(1)
+	dl, ok := ctx.Deadline()
+	f.mu.Lock()
+	f.printHadDDL = ok
+	f.printDeadline = dl
+	f.mu.Unlock()
 	return f.res, f.err
 }
-func (f *fakePrinter) ResumeJob(context.Context, int) (printer.Result, *apierr.Error) {
+func (f *fakePrinter) ResumeJob(ctx context.Context, _ int) (printer.Result, *apierr.Error) {
 	f.resumeCalls.Add(1)
+	dl, ok := ctx.Deadline()
+	f.mu.Lock()
+	f.resumeHadDDL = ok
+	f.resumeDeadline = dl
+	f.mu.Unlock()
 	return f.res, f.err
 }
 
@@ -76,10 +96,11 @@ func (m *memStore) getPending(k string) (string, bool) {
 
 func newHandlers(p PrintService, s Store) *Handlers {
 	return &Handlers{
-		Printer: p,
-		Store:   s,
-		KeyLock: NewKeyLock(),
-		Health:  func(context.Context) (int, any) { return 200, map[string]string{"status": "ok"} },
+		Printer:        p,
+		Store:          s,
+		KeyLock:        NewKeyLock(),
+		ConfirmTimeout: 90 * time.Second, // #27: server-side upper bound for the print op
+		Health:         func(context.Context) (int, any) { return 200, map[string]string{"status": "ok"} },
 	}
 }
 
@@ -277,6 +298,54 @@ func TestPrintJobAcceptsBodyWithinLimit(t *testing.T) {
 
 	if rec.Code != 200 {
 		t.Fatalf("in-limit body must succeed, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// Regression (#27): PrintJobs must hand Print a context carrying a server-side
+// deadline (ConfirmTimeout budget) so a hung lp/JobState cannot pin the operation
+// forever — not merely r.Context() (canceled only on client disconnect).
+func TestPrintJobAppliesServerSideDeadline(t *testing.T) {
+	store := newMemStore()
+	fp := &fakePrinter{res: printer.Result{Status: "printed", CUPSJobID: "7"}}
+	h := newHandlers(fp, store)
+	body := `{"label_base64":"XlhBREFUQV5YWg==","copies":1}`
+	req := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "pj:deadline")
+	rec := httptest.NewRecorder()
+	h.PrintJobs(rec, req)
+
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	if !fp.printHadDDL {
+		t.Fatal("Print must receive a ctx with a deadline (#27 server-side time budget)")
+	}
+	// The deadline must be in the future and bounded by ~ConfirmTimeout.
+	until := time.Until(fp.printDeadline)
+	if until <= 0 {
+		t.Errorf("deadline must be in the future, got %v from now", until)
+	}
+	if until > h.ConfirmTimeout+time.Second {
+		t.Errorf("deadline %v exceeds ConfirmTimeout budget %v", until, h.ConfirmTimeout)
+	}
+}
+
+// Regression (#27): the resume-by-key path must also bound ResumeJob with the
+// server-side deadline.
+func TestResumeJobAppliesServerSideDeadline(t *testing.T) {
+	store := newMemStore()
+	store.pending["pj:resumeddl"] = "42"
+	fp := &fakePrinter{res: printer.Result{Status: "printed", CUPSJobID: "42"}}
+	h := newHandlers(fp, store)
+	body := `{"label_base64":"XlhBREFUQV5YWg==","copies":1}`
+	req := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "pj:resumeddl")
+	rec := httptest.NewRecorder()
+	h.PrintJobs(rec, req)
+
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	if !fp.resumeHadDDL {
+		t.Fatal("ResumeJob must receive a ctx with a deadline (#27 server-side time budget)")
 	}
 }
 

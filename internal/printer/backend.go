@@ -24,6 +24,16 @@ func (s *SocketReachability) Reachable(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// QueuePaused is a DELIBERATE best-effort, fail-open precheck (#21 accepted risk).
+// It returns (false, nil) both when Reasons is unwired (unit tests; prod always
+// wires cups.PrinterReasons) and when the IPP PrinterReasons query errors. This
+// fail-open is intentional and has NO correctness impact: it is only a fast-fail
+// hint. The AUTHORITATIVE physical signal is the ~HS probe in verify(); a queue
+// that is genuinely paused/disabled is still caught downstream — a disabled queue
+// never reaches JobCompleted -> pollAndVerify returns PRINT_TIMEOUT, and a
+// rejecting queue fails Submit -> CUPS_UNAVAILABLE. So a missed pause here can
+// never produce a false "printed". (socket:9100 gives CUPS no back-channel, so
+// printer-state-reasons are advisory only — see hoststatus.go.)
 func (s *SocketReachability) QueuePaused(ctx context.Context) (bool, error) {
 	if s.Reasons == nil {
 		return false, nil

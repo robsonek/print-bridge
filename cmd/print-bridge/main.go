@@ -67,6 +67,14 @@ func main() {
 		Updater: func(tag string) error {
 			return update.SpawnUpdater(absUnder(exeDir, "update-bridge.sh"), tag)
 		},
+		// #27: server-side upper bound for the whole print op (exec lp + every
+		// JobState IPP round-trip + verify), so a hung cupsd `lp` held open by a
+		// non-timing-out client cannot pin the handler forever. Sized to sit just
+		// UNDER the HTTP WriteTimeout (ConfirmTimeoutSec+60) so the handler returns
+		// its own clean retryable error before the raw connection is guillotined,
+		// while still exceeding the healthy poll loop's nominal ConfirmTimeoutSec
+		// (×1s PollInterval) budget so a slow-but-healthy print is never cut off.
+		ConfirmTimeout: time.Duration(cfg.ConfirmTimeoutSec+55) * time.Second,
 	}
 
 	srv := &http.Server{
