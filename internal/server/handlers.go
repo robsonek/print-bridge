@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -32,6 +33,7 @@ type PrintService interface {
 type Handlers struct {
 	Printer PrintService
 	Store   Store
+	KeyLock *KeyLock
 	Health  func(context.Context) (int, any)
 	Updater func(tag string) error
 }
@@ -51,21 +53,43 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resume-by-key.
-	if rec, found, err := h.Store.Get(key); err == nil && found {
+	// Per-key lock (#3,#5): serialize the whole Get -> resume/print -> persist
+	// flow for concurrent requests sharing this Idempotency-Key, so two parallel
+	// requests cannot both fall through to a fresh Submit and double-print.
+	unlock := h.KeyLock.Lock(key)
+	defer unlock()
+
+	// Resume-by-key. Distinguish store-error (#13: must NOT print, refuse and let
+	// the caller retry) from a genuine miss (safe to do a fresh print).
+	rec, found, err := h.Store.Get(key)
+	if err != nil {
+		log.Printf("idempotency Get failed for key %q: %v", key, err)
+		// Pending row may already carry a submitted job; a fresh print could
+		// duplicate it. Retryable so Laravel re-tries instead of resubmitting.
+		writeError(w, apierr.New(apierr.CodeBridgeRestarting, "idempotency store unavailable, retry", http.StatusServiceUnavailable))
+		return
+	}
+	if found {
 		if rec.Terminal {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(rec.ResponseJSON))
 			return
 		}
-		if rec.CUPSJobID != "" {
-			if jobID, cerr := strconv.Atoi(rec.CUPSJobID); cerr == nil {
-				res, perr := h.Printer.ResumeJob(r.Context(), jobID)
-				h.finish(w, key, res, perr)
-				return
-			}
+		// Pending: a job was already submitted to CUPS for this key. Resume it
+		// instead of resubmitting. If the stored job id is missing/unparsable
+		// (corruption — unreachable in normal flow), refuse with a retryable
+		// error rather than risk a duplicate print (#13).
+		jobID, cerr := strconv.Atoi(rec.CUPSJobID)
+		if rec.CUPSJobID == "" || cerr != nil {
+			log.Printf("pending record with unusable cups_job_id for key %q: %q", key, rec.CUPSJobID)
+			writeError(w, apierr.New(apierr.CodeBridgeRestarting, "pending job has no resumable cups_job_id", http.StatusServiceUnavailable))
+			return
 		}
+		res, perr := h.Printer.ResumeJob(r.Context(), jobID)
+		h.persistPending(key, res)
+		h.finish(w, key, res, perr)
+		return
 	}
 
 	var req printJobRequest
@@ -88,11 +112,27 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, perr := h.Printer.Print(r.Context(), data, copies)
-	if perr == nil {
-		// Persist cups job id for resume before declaring terminal.
-		_ = h.Store.SavePending(key, res.CUPSJobID)
-	}
+	// Persist the cups job id whenever Print surfaced one — including post-submit
+	// error paths (#4,#11). The Result carries the job id even on a retryable error
+	// after a successful Submit, so a retry with this key RESUMES the existing job
+	// (ResumeJob above) instead of resubmitting => no duplicate label.
+	//
+	// ACCEPTED RESIDUAL: a sub-second crash window remains between the lp Submit
+	// inside Print() and this SavePending. It cannot be closed without a pre-submit
+	// marker (a much larger change); this fix already eliminates the 30s polling
+	// window and the concurrency window, which were the dominant duplicate vectors.
+	h.persistPending(key, res)
 	h.finish(w, key, res, perr)
+}
+
+// persistPending records the CUPS job id for resume-by-key when present.
+func (h *Handlers) persistPending(key string, res printer.Result) {
+	if res.CUPSJobID == "" {
+		return
+	}
+	if err := h.Store.SavePending(key, res.CUPSJobID); err != nil {
+		log.Printf("idempotency SavePending key=%q job=%q failed: %v", key, res.CUPSJobID, err)
+	}
 }
 
 func (h *Handlers) finish(w http.ResponseWriter, key string, res printer.Result, perr *apierr.Error) {
@@ -101,7 +141,12 @@ func (h *Handlers) finish(w http.ResponseWriter, key string, res printer.Result,
 		return
 	}
 	body, _ := json.Marshal(res)
-	_ = h.Store.SaveTerminal(key, string(body))
+	// Log (don't fail) a SaveTerminal error (#25): the physical print already
+	// succeeded; a retry will resume the (completed) job and replay rather than
+	// reprint, so returning success here is correct.
+	if err := h.Store.SaveTerminal(key, string(body)); err != nil {
+		log.Printf("idempotency SaveTerminal key=%q failed: %v", key, err)
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 

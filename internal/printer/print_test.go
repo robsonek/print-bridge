@@ -139,3 +139,56 @@ func TestPrintAborted(t *testing.T) {
 		t.Fatalf("want CUPS_UNAVAILABLE on abort, got %v", e)
 	}
 }
+
+// Regression (#4,#11): after a successful Submit, every post-submit error path
+// must carry the CUPS job id in Result so the handler can persist it for
+// resume-by-key. Without it a retry resubmits => duplicate physical label.
+func TestPrintTimeoutCarriesCUPSJobID(t *testing.T) {
+	f := &fakeBackend{reachable: true, states: []int{JobProcessing}, hsOK: true}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodePrintTimeout {
+		t.Fatalf("want PRINT_TIMEOUT, got %v", e)
+	}
+	if res.CUPSJobID != "7" {
+		t.Errorf("timeout Result must carry submitted job id 7, got %q", res.CUPSJobID)
+	}
+}
+
+func TestPrintAbortCarriesCUPSJobID(t *testing.T) {
+	f := &fakeBackend{reachable: true, states: []int{JobAborted}, hsOK: true}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodeCUPSUnavailable {
+		t.Fatalf("want CUPS_UNAVAILABLE, got %v", e)
+	}
+	if res.CUPSJobID != "7" {
+		t.Errorf("abort Result must carry submitted job id 7, got %q", res.CUPSJobID)
+	}
+}
+
+func TestPrintPaperOutCarriesCUPSJobID(t *testing.T) {
+	f := &fakeBackend{reachable: true, states: []int{JobCompleted}, hs: HostStatus{PaperOut: true}, hsOK: true}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodeOutOfPaper {
+		t.Fatalf("want PRINTER_OUT_OF_PAPER, got %v", e)
+	}
+	if res.CUPSJobID != "7" {
+		t.Errorf("paper-out Result must carry submitted job id 7, got %q", res.CUPSJobID)
+	}
+}
+
+// Submit itself failing must NOT carry a job id (no physical job exists ->
+// resubmit is correct, no duplicate).
+func TestPrintSubmitFailureNoCUPSJobID(t *testing.T) {
+	f := &fakeBackend{reachable: true, submitErr: errors.New("lp boom")}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodeCUPSUnavailable {
+		t.Fatalf("want CUPS_UNAVAILABLE on submit failure, got %v", e)
+	}
+	if res.CUPSJobID != "" {
+		t.Errorf("submit failure must NOT carry a job id, got %q", res.CUPSJobID)
+	}
+}

@@ -57,6 +57,7 @@ func main() {
 	h := &server.Handlers{
 		Printer: p,
 		Store:   server.NewStoreAdapter(store),
+		KeyLock: server.NewKeyLock(),
 		Health:  makeHealth(reach, probe, cups),
 		Updater: func(tag string) error {
 			return update.SpawnUpdater(absUnder(exeDir, "update-bridge.sh"), tag)
