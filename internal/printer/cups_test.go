@@ -1,6 +1,7 @@
 package printer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -25,6 +26,28 @@ func TestParseJobID(t *testing.T) {
 func TestParseJobIDError(t *testing.T) {
 	if _, err := parseJobID("lp: Error - no such destination\n"); err == nil {
 		t.Fatal("expected error when lp output has no request id")
+	}
+}
+
+// #14 regression: `lp -o raw -n N` does NOT replicate raw ZPL on a socket-backed
+// raw queue (backend/socket.c forces copies=1 for stdin). The agent must instead
+// duplicate the whole ^XA..^XZ ZPL stream N times itself, so copies>1 yields N
+// physical labels. buildSubmitPayload is the pure payload builder Submit uses.
+func TestBuildSubmitPayloadCopies(t *testing.T) {
+	zpl := []byte("^XADATA^XZ")
+
+	if got := buildSubmitPayload(zpl, 3); !bytes.Equal(got, bytes.Repeat(zpl, 3)) {
+		t.Errorf("copies=3 must replicate the ZPL stream 3x, got %q", got)
+	}
+	if n := bytes.Count(buildSubmitPayload(zpl, 3), []byte("^XA")); n != 3 {
+		t.Errorf("copies=3 must produce 3 ^XA blocks, got %d", n)
+	}
+
+	// copies <= 1 must pass the original through unchanged (no replication).
+	for _, c := range []int{1, 0, -1} {
+		if got := buildSubmitPayload(zpl, c); !bytes.Equal(got, zpl) {
+			t.Errorf("copies=%d must not replicate, got %q", c, got)
+		}
 	}
 }
 

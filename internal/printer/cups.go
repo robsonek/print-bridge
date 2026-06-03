@@ -57,14 +57,28 @@ func parseJobID(lpOutput string) (int, error) {
 	return strconv.Atoi(m[1])
 }
 
-// Submit pipes the data (ZPL) to `lp -o raw` and returns the CUPS job id.
-func (c *CUPSClient) Submit(ctx context.Context, data []byte, copies int) (int, error) {
-	args := []string{"-d", c.queue, "-o", "raw"}
-	if copies > 1 {
-		args = append(args, "-n", strconv.Itoa(copies))
+// buildSubmitPayload realizes `copies` by REPLICATING the whole ZPL stream, not
+// via `lp -n`. #14: a raw queue over a socket:9100 backend does NOT honor the IPP
+// `copies` attribute for stdin input — CUPS' socket backend forces copies=1
+// (backend/socket.c: print_fd==0 => copies=1; it cannot lseek() a pipe to resend),
+// and raw ZPL carries no ^PQ quantity command, so `lp -o raw -n N` prints exactly
+// ONE label. Each ^XA..^XZ is a self-contained label, so concatenating the stream
+// N times feeds N labels deterministically and language-agnostically (the socket
+// backend just passes the bytes through). copies<=1 returns the data unchanged.
+func buildSubmitPayload(data []byte, copies int) []byte {
+	if copies <= 1 {
+		return data
 	}
-	cmd := exec.CommandContext(ctx, "lp", args...)
-	cmd.Stdin = bytes.NewReader(data)
+	return bytes.Repeat(data, copies)
+}
+
+// Submit pipes the data (ZPL) to `lp -o raw` and returns the CUPS job id. copies>1
+// is realized by replicating the ZPL stream in the payload (see buildSubmitPayload),
+// NOT by `lp -n` which the socket backend ignores for raw stdin jobs (#14).
+func (c *CUPSClient) Submit(ctx context.Context, data []byte, copies int) (int, error) {
+	payload := buildSubmitPayload(data, copies)
+	cmd := exec.CommandContext(ctx, "lp", "-d", c.queue, "-o", "raw")
+	cmd.Stdin = bytes.NewReader(payload)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("lp failed: %v: %s", err, out)
