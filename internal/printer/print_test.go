@@ -9,17 +9,19 @@ import (
 )
 
 type fakeBackend struct {
-	reachable bool
-	paused    bool
-	states    []int // returned in sequence by JobState
-	idx       int
-	hs        HostStatus
-	hsOK      bool
-	hsErr     error
-	submitErr error
-	rendered  []byte
-	renderErr error
-	submitted []byte
+	reachable   bool
+	paused      bool
+	states      []int // returned in sequence by JobState
+	idx         int
+	hs          HostStatus
+	hsOK        bool
+	hsErr       error
+	submitErr   error
+	rendered    []byte
+	renderErr   error
+	submitted   []byte
+	jobStateErr error // when set, JobState returns this error instead of a state
+	pollCalls   int   // number of JobState invocations (for fast-return assertions)
 }
 
 func (f *fakeBackend) Reachable(context.Context) (bool, error)   { return f.reachable, nil }
@@ -29,6 +31,10 @@ func (f *fakeBackend) Submit(_ context.Context, d []byte, _ int) (int, error) {
 	return 7, f.submitErr
 }
 func (f *fakeBackend) JobState(context.Context, int) (int, error) {
+	f.pollCalls++
+	if f.jobStateErr != nil {
+		return 0, f.jobStateErr
+	}
 	s := f.states[f.idx]
 	if f.idx < len(f.states)-1 {
 		f.idx++
@@ -172,21 +178,88 @@ func TestPrintProcessingStoppedKeepsPolling(t *testing.T) {
 	}
 }
 
-// #9 regression: JobPendingHeld (IPP state 4) is non-terminal -> keep polling
-// (per project decision) rather than aborting. A [4,4,9] sequence ends printed.
-func TestPrintPendingHeldKeepsPolling(t *testing.T) {
+// #9 regression: JobPendingHeld (IPP state 4) needs an explicit operator release
+// and will NOT resume on its own. pollAndVerify must return FAST with a descriptive
+// QUEUE_PAUSED (not poll out the whole budget into a misleading PRINT_TIMEOUT),
+// carrying the IPP state + cups job id as actionable details.
+func TestPrintPendingHeldReturnsQueuePausedFast(t *testing.T) {
 	f := &fakeBackend{
 		reachable: true,
-		states:    []int{JobPendingHeld, JobPendingHeld, JobCompleted},
+		states:    []int{JobPendingHeld},
 		hsOK:      true,
 	}
-	p := newPrinter(f)
+	p := newPrinter(f) // ConfirmTimeoutPolls=5
 	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodeQueuePaused {
+		t.Fatalf("want QUEUE_PAUSED on pending-held, got err=%v", e)
+	}
+	// Fast return: a single poll surfacing state 4 must short-circuit, NOT consume
+	// the whole ConfirmTimeoutPolls budget (which would yield PRINT_TIMEOUT).
+	if f.pollCalls != 1 {
+		t.Errorf("pending-held must return after 1 poll, got %d polls", f.pollCalls)
+	}
+	if res.CUPSJobID != "7" {
+		t.Errorf("held Result must carry submitted job id 7, got %q", res.CUPSJobID)
+	}
+	if e.Details["ipp_job_state"] != JobPendingHeld {
+		t.Errorf("want details.ipp_job_state=%d, got %v", JobPendingHeld, e.Details["ipp_job_state"])
+	}
+	if e.Details["cups_job_id"] != "7" {
+		t.Errorf("want details.cups_job_id=7, got %v", e.Details["cups_job_id"])
+	}
+}
+
+// #6 regression (eviction edge): when JobState reports ErrJobGone (CUPS purged the
+// job from history), pollAndVerify must NOT return a hard CUPS_UNAVAILABLE. The
+// job we submitted is gone => almost certainly completed => fall through to the
+// ~HS verify(). With a healthy printer that yields "printed" (no false re-queue /
+// double print on the resume-by-key recovery path).
+func TestPollEvictedJobFallsThroughToVerify(t *testing.T) {
+	f := &fakeBackend{
+		reachable:   true,
+		jobStateErr: ErrJobGone,
+		hsOK:        true, // healthy ~HS reply
+	}
+	p := newPrinter(f)
+	res, e := p.ResumeJob(context.Background(), 7)
 	if e != nil {
-		t.Fatalf("state 4 must not abort; want printed, got err %v", e)
+		t.Fatalf("ErrJobGone must route to verify, not fail; got err %v", e)
 	}
 	if res.Status != "printed" {
-		t.Errorf("status = %q, want printed after held->completed", res.Status)
+		t.Errorf("evicted+healthy printer => printed, got %+v", res)
+	}
+}
+
+// #6 regression: ErrJobGone routed to verify() must still honor the hardware
+// truth. If ~HS reports media-empty, the result is the real OUT_OF_PAPER fault,
+// NOT a falsely-degraded "printed".
+func TestPollEvictedJobReportsHardwareFault(t *testing.T) {
+	f := &fakeBackend{
+		reachable:   true,
+		jobStateErr: ErrJobGone,
+		hs:          HostStatus{PaperOut: true},
+		hsOK:        true,
+	}
+	p := newPrinter(f)
+	_, e := p.ResumeJob(context.Background(), 7)
+	if e == nil || e.Code != apierr.CodeOutOfPaper {
+		t.Fatalf("evicted job with paper-out ~HS must report OUT_OF_PAPER, got %v", e)
+	}
+}
+
+// #6 regression: a non-eviction JobState error (e.g. a real CUPS/transport
+// failure, NOT ErrJobGone) must still map to the hard retryable CUPS_UNAVAILABLE
+// — the ErrJobGone fast-path must not swallow genuine failures.
+func TestPollGenericJobStateErrorStaysCUPSUnavailable(t *testing.T) {
+	f := &fakeBackend{
+		reachable:   true,
+		jobStateErr: errors.New("connection refused"),
+		hsOK:        true,
+	}
+	p := newPrinter(f)
+	_, e := p.ResumeJob(context.Background(), 7)
+	if e == nil || e.Code != apierr.CodeCUPSUnavailable {
+		t.Fatalf("non-gone JobState error must be CUPS_UNAVAILABLE, got %v", e)
 	}
 }
 

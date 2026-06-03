@@ -3,6 +3,7 @@ package printer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -12,6 +13,13 @@ import (
 
 	"github.com/OpenPrinting/goipp"
 )
+
+// ErrJobGone means CUPS no longer has the job in its history (purged/evicted via
+// PreserveJobHistory/MaxJobs). For a job we already submitted, "gone" most likely
+// means it completed, so pollAndVerify routes this to a best-effort ~HS verify
+// instead of a hard CUPS_UNAVAILABLE failure. It is returned as a bare sentinel
+// (no wrapping) so callers can match it with errors.Is.
+var ErrJobGone = errors.New("ipp: job not found in CUPS history")
 
 // IPP job-state values (RFC 8011 §5.3.7).
 const (
@@ -74,6 +82,18 @@ func (c *CUPSClient) JobState(ctx context.Context, jobID int) (int, error) {
 
 	resp, err := c.doIPP(ctx, req)
 	if err != nil {
+		// #6: doIPP returns the decoded message even on an IPP error status, so we
+		// can distinguish "job evicted from CUPS history" (not-found / gone) from a
+		// genuine failure. The former is the expected outcome on the resume-by-key
+		// recovery path after CUPS purges completed-job history -> map to the
+		// ErrJobGone sentinel so pollAndVerify can fall back to ~HS verify instead
+		// of treating a printed job as a hard CUPS_UNAVAILABLE error.
+		if resp != nil {
+			switch goipp.Status(resp.Code) {
+			case goipp.StatusErrorNotFound, goipp.StatusErrorGone:
+				return 0, ErrJobGone
+			}
+		}
 		return 0, err
 	}
 	for _, g := range resp.Groups {

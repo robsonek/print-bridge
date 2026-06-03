@@ -2,6 +2,7 @@ package printer
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -82,16 +83,22 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID int) (Result, *apierr
 	for i := 0; i < p.ConfirmTimeoutPolls; i++ {
 		state, err := p.Poll.JobState(ctx, jobID)
 		if err != nil {
+			// #6: CUPS no longer has the job in its history (purged/evicted). For a
+			// job WE already submitted, "gone" almost certainly means it completed.
+			// The IPP queue is no longer authoritative -> trust the hardware: route
+			// to the ~HS verify() (best-effort physical check) instead of failing
+			// the recovery path with a hard, retryable CUPS_UNAVAILABLE that would
+			// false-requeue (double print) or false-alert a label that printed.
+			if errors.Is(err, ErrJobGone) {
+				return p.verify(ctx, jobID)
+			}
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, "job poll failed: "+err.Error(), 503)
 		}
 		// RFC 8011 §5.3.7: only completed / canceled / aborted are TERMINATING
-		// states. Everything else (pending=3, pending-held=4, processing=5,
-		// processing-stopped=6) is non-terminal => keep polling. In particular
-		// (#1) processing-stopped means the printer halted mid-job (out of paper
-		// / jam / pause) and CUPS will resume it to processing->completed once the
-		// fault clears; and (#9) pending-held means the job is held (operator hold
-		// / error-policy) and will resume on release. Aborting either of those
-		// would porzucic an odzyskiwalny job and risk a duplicate on retry.
+		// states. processing-stopped (6) is non-terminal => keep polling: (#1) the
+		// printer halted mid-job (out of paper / jam / pause) and CUPS will resume
+		// it to processing->completed once the fault clears; aborting would porzucic
+		// an odzyskiwalny job and risk a duplicate on retry.
 		switch state {
 		case JobCompleted:
 			return p.verify(ctx, jobID)
@@ -99,6 +106,18 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID int) (Result, *apierr
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodeInvalidZPL, "job canceled by CUPS", 422)
 		case JobAborted:
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, "job aborted by CUPS", 503)
+		case JobPendingHeld:
+			// #9: IPP pending-held (4) is non-terminal but, unlike processing-stopped,
+			// it will NOT resume on its own — it needs an explicit operator release
+			// (Release-Job / cupsenable). Polling it out wastes the whole confirm
+			// budget (~30s) and then returns a misleading PRINT_TIMEOUT. Return fast
+			// with a descriptive QUEUE_PAUSED (retryable: a later retry / resume-by-key
+			// finishes the job once released) carrying the IPP state + job id so the
+			// operator gets an actionable signal instead of a generic timeout.
+			return Result{CUPSJobID: id}, apierr.New(apierr.CodeQueuePaused,
+				"job held by CUPS (pending-held); requires operator release", 503).
+				WithDetail("ipp_job_state", state).
+				WithDetail("cups_job_id", id)
 		}
 		if p.PollInterval > 0 {
 			select {

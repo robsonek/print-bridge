@@ -1,7 +1,13 @@
 package printer
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenPrinting/goipp"
 )
@@ -55,5 +61,60 @@ func TestCheckIPPStatus(t *testing.T) {
 		if err := checkIPPStatus(msg); err == nil {
 			t.Errorf("status 0x%04x must yield an error, got nil", uint16(st))
 		}
+	}
+}
+
+// ippStatusServer stands up a fake CUPS that replies to every IPP request with a
+// response whose operation status == st and an empty group set (no job-state).
+func ippStatusServer(t *testing.T, st goipp.Status) *CUPSClient {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := goipp.NewResponse(goipp.DefaultVersion, st, 1)
+		resp.Operation.Add(goipp.MakeAttribute("attributes-charset", goipp.TagCharset, goipp.String("utf-8")))
+		resp.Operation.Add(goipp.MakeAttribute("attributes-natural-language", goipp.TagLanguage, goipp.String("en")))
+		body, err := resp.EncodeBytes()
+		if err != nil {
+			t.Errorf("encode IPP response: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/ipp")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return &CUPSClient{
+		queue:  "test",
+		ippURL: srv.URL,
+		httpc:  &http.Client{Timeout: 2 * time.Second},
+	}
+}
+
+// #6 regression: an IPP client-error-not-found / client-error-gone (job purged
+// from CUPS history) must surface as the ErrJobGone sentinel so pollAndVerify can
+// route the resume-by-key recovery path to a best-effort ~HS verify instead of a
+// hard CUPS_UNAVAILABLE for a label that physically printed.
+func TestJobStateGoneReturnsSentinel(t *testing.T) {
+	for _, st := range []goipp.Status{goipp.StatusErrorNotFound, goipp.StatusErrorGone} {
+		c := ippStatusServer(t, st)
+		_, err := c.JobState(context.Background(), 7)
+		if !errors.Is(err, ErrJobGone) {
+			t.Errorf("status 0x%04x must map to ErrJobGone, got %v", uint16(st), err)
+		}
+	}
+}
+
+// #6 regression: a non-eviction IPP error (e.g. forbidden) must NOT be swallowed
+// as ErrJobGone — it stays a descriptive error so pollAndVerify maps it to the
+// hard CUPS_UNAVAILABLE/503 (and the precise IPP code is preserved for diag).
+func TestJobStateForbiddenIsNotGone(t *testing.T) {
+	c := ippStatusServer(t, goipp.StatusErrorForbidden)
+	_, err := c.JobState(context.Background(), 7)
+	if err == nil {
+		t.Fatal("forbidden must yield an error")
+	}
+	if errors.Is(err, ErrJobGone) {
+		t.Errorf("forbidden must NOT be ErrJobGone, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "0x0401") {
+		t.Errorf("error must carry the IPP status code, got %v", err)
 	}
 }
