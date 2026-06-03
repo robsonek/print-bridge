@@ -14,16 +14,22 @@ sleep 3
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-curl -fsSL "$URL" -o "$TMP/agent.tar.gz"
+# Download under the REAL asset name. release.yml builds the .sha256 with
+# `sha256sum "$TARBALL"` where TARBALL == $ASSET, so the checksum file embeds that
+# exact filename. `sha256sum -c` re-opens the filename it reads FROM the checksum
+# file, so the local file MUST be named $ASSET (not agent.tar.gz) or the check
+# fails to find the file. (Bug #24-regression: downloading as agent.tar.gz made
+# every legitimate update abort at the checksum step.)
+curl -fsSL "$URL" -o "$TMP/$ASSET"
 # #24: sha256 verification is MANDATORY, fail-closed. A missing/failed checksum
 # download (no `|| true`) or a mismatch aborts the update via `set -e` BEFORE the
 # binary is ever installed. The .sha256 is co-located with the tarball on the same
 # HTTPS host, so this guards against a corrupted/truncated download (NOT active
 # tampering — that would need an out-of-band signature, a separate larger change).
-curl -fsSL "${URL}.sha256" -o "$TMP/agent.tar.gz.sha256"
-(cd "$TMP" && sha256sum -c "agent.tar.gz.sha256")
+curl -fsSL "${URL}.sha256" -o "$TMP/${ASSET}.sha256"
+(cd "$TMP" && sha256sum -c "${ASSET}.sha256")
 
-tar -xzf "$TMP/agent.tar.gz" -C "$TMP"
+tar -xzf "$TMP/$ASSET" -C "$TMP"
 systemctl stop print-bridge
 install -m 0755 "$TMP/print-bridge" "$INSTALL_DIR/print-bridge"
 [ -f "$TMP/update-bridge.sh" ] && install -m 0755 "$TMP/update-bridge.sh" "$INSTALL_DIR/update-bridge.sh"
