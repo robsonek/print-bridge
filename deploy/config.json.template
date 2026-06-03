@@ -1,0 +1,14 @@
+{
+  "listen_port": 9443,
+  "print_token": "REPLACE_WITH_64_CHAR_TOKEN",
+  "cups_queue": "xp423b",
+  "printer_ip": "10.0.0.50",
+  "tls_cert_path": "data/cert.pem",
+  "tls_key_path": "data/key.pem",
+  "idempotency_db": "data/idempotency.db",
+  "idempotency_ttl_days": 30,
+  "confirm_timeout_sec": 30,
+  "label_width_mm": 104,
+  "label_height_mm": 148,
+  "render_dpi": 203
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=print-bridge (thermal label print agent)
+After=network-online.target cups.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=print-bridge
+Group=print-bridge
+WorkingDirectory=/opt/print-bridge
+ExecStart=/opt/print-bridge/print-bridge
+Restart=on-failure
+RestartSec=60
+StartLimitBurst=3
+StartLimitIntervalSec=86400
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
