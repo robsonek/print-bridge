@@ -115,6 +115,31 @@ func TestPrintTimeout(t *testing.T) {
 	}
 }
 
+// A multi-label job (multi-parcel PDF/ZPL) prints serially on the single-threaded
+// print-server and needs proportionally longer to confirm. The confirm budget must
+// scale with the label count (^XA), else a 2-parcel job false-times-out at 30s
+// while still printing (observed on hardware with a 2-page DPD PDF).
+func TestPrintConfirmTimeoutScalesWithLabelCount(t *testing.T) {
+	f := &fakeBackend{reachable: true, states: []int{JobProcessing}, hsOK: true}
+	p := newPrinter(f) // ConfirmTimeoutPolls=5
+	_, e := p.Print(context.Background(), []byte("^XAa^XZ^XAb^XZ"), 1)
+	if e == nil || e.Code != apierr.CodePrintTimeout {
+		t.Fatalf("want PRINT_TIMEOUT, got %v", e)
+	}
+	if f.pollCalls != 10 { // base 5 * 2 labels
+		t.Errorf("2-label job must poll base*2=10 times before timeout, got %d", f.pollCalls)
+	}
+}
+
+func TestPrintSingleLabelUsesBaseTimeout(t *testing.T) {
+	f := &fakeBackend{reachable: true, states: []int{JobProcessing}, hsOK: true}
+	p := newPrinter(f) // ConfirmTimeoutPolls=5
+	_, _ = p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if f.pollCalls != 5 { // base 5 * 1 label
+		t.Errorf("1-label job must poll base=5 times, got %d", f.pollCalls)
+	}
+}
+
 func TestPrintPaperOutAfterCompletion(t *testing.T) {
 	f := &fakeBackend{reachable: true, states: []int{JobCompleted}, hs: HostStatus{PaperOut: true}, hsOK: true}
 	p := newPrinter(f)

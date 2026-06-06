@@ -19,6 +19,44 @@ func TestLoadDefaultsWhenNoFile(t *testing.T) {
 	}
 }
 
+func TestRenderQualityDefaults(t *testing.T) {
+	// Calibrated on a real XP-423B (2026-06-06): render width below the 832-dot
+	// printhead to leave a margin, darker threshold + ^MD + slow ^PR against faint
+	// thermal print. See print-bridge/docs/hardware-spike-findings.md.
+	c := Default()
+	checks := map[string]struct{ got, want int }{
+		"RenderThreshold": {c.RenderThreshold, 160},
+		"LabelDarkness":   {c.LabelDarkness, 14},
+		"PrintSpeedIPS":   {c.PrintSpeedIPS, 2},
+		"MarginXDots":     {c.MarginXDots, 16},
+		"MarginYDots":     {c.MarginYDots, 8},
+		"PrintWidthDots":  {c.PrintWidthDots, 832},
+		"RenderWidthDots": {c.RenderWidthDots, 800},
+	}
+	for name, ck := range checks {
+		if ck.got != ck.want {
+			t.Errorf("default %s = %d, want %d", name, ck.got, ck.want)
+		}
+	}
+}
+
+func TestRenderQualityFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	os.WriteFile(path, []byte(`{"print_token":"t","cups_queue":"q","printer_ip":"1.2.3.4","label_darkness":20,"print_speed_ips":3,"render_threshold":140}`), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.LabelDarkness != 20 || c.PrintSpeedIPS != 3 || c.RenderThreshold != 140 {
+		t.Errorf("file overrides not applied: MD=%d PR=%d thresh=%d", c.LabelDarkness, c.PrintSpeedIPS, c.RenderThreshold)
+	}
+	// Unspecified render fields keep defaults.
+	if c.PrintWidthDots != 832 || c.RenderWidthDots != 800 {
+		t.Errorf("unspecified render fields lost defaults: PW=%d RW=%d", c.PrintWidthDots, c.RenderWidthDots)
+	}
+}
+
 func TestLoadFileThenEnvOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

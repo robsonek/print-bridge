@@ -10,5 +10,13 @@
   "confirm_timeout_sec": 30,
   "label_width_mm": 102,
   "label_height_mm": 152,
-  "render_dpi": 203
+  "render_dpi": 203,
+
+  "render_threshold": 160,
+  "label_darkness": 14,
+  "print_speed_ips": 2,
+  "margin_x_dots": 16,
+  "margin_y_dots": 8,
+  "print_width_dots": 832,
+  "render_width_dots": 800
 }
