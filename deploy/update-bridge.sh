@@ -21,9 +21,31 @@ REPO="robsonek/print-bridge"
 INSTALL_DIR=/opt/print-bridge
 SELF=/usr/local/sbin/update-bridge.sh
 SUDOERS=/etc/sudoers.d/print-bridge
+LOGFILE="$INSTALL_DIR/data/update.log"
 ARCH="$(dpkg --print-architecture)" # amd64 / arm64
 ASSET="print-bridge-${TAG#v}-linux-${ARCH}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+
+# Ucieczka z cgroupy serwisu: gdy spawnuje nas agent (sudo z wnętrza
+# print-bridge.service), `systemctl stop print-bridge` niżej zabiłoby TEN
+# proces razem z całą cgroupą — Setpgid odłącza od grupy procesów, ale NIE od
+# cgroupy systemd (updater umierał w połowie roboty, zaobserwowane na sprzęcie
+# 2026-06-07: log urwany po sha256, serwis zostawał inactive). Re-exec do
+# transient unitu (osobna cgroupa) z dopisywaniem wyjścia do LOGFILE.
+# Ręczne `sudo update-bridge.sh` (spoza cgroupy serwisu) zostaje inline i
+# pisze na terminal operatora.
+if [ -z "${PB_UPDATE_DETACHED:-}" ] && grep -qs 'print-bridge\.service' /proc/self/cgroup; then
+  if command -v systemd-run >/dev/null; then
+    echo "re-exec do transient unitu (poza cgroupą print-bridge.service)"
+    exec systemd-run --collect --quiet \
+      --unit="print-bridge-update-$(date +%s)" \
+      --property=StandardOutput="append:${LOGFILE}" \
+      --property=StandardError="append:${LOGFILE}" \
+      --setenv=PB_UPDATE_DETACHED=1 \
+      "$SELF" "$TAG"
+  fi
+  echo "WARNING: brak systemd-run — kontynuuję w cgroupie serwisu (systemctl stop może zabić updater)" >&2
+fi
 
 echo "=== $(date -Is) update-bridge.sh start tag=${TAG} arch=${ARCH}"
 sleep 3
