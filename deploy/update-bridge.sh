@@ -33,6 +33,9 @@ tar -xzf "$TMP/$ASSET" -C "$TMP"
 systemctl stop print-bridge
 install -m 0755 "$TMP/print-bridge" "$INSTALL_DIR/print-bridge"
 [ -f "$TMP/update-bridge.sh" ] && install -m 0755 "$TMP/update-bridge.sh" "$INSTALL_DIR/update-bridge.sh"
+# CUPS backend lives outside INSTALL_DIR and must stay root-owned (cupsd runs
+# backends only from /usr/lib/cups/backend; see install-debian.sh).
+[ -f "$TMP/lpdpaced" ] && install -o root -g root -m 0755 "$TMP/lpdpaced" /usr/lib/cups/backend/lpdpaced
 chown -R print-bridge:print-bridge "$INSTALL_DIR"
 systemctl start print-bridge
 

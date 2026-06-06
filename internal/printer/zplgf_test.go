@@ -11,10 +11,10 @@ func TestEncodeGF(t *testing.T) {
 	// Compression codes: G-Y = run 1-19, g-z = run 20-400, "," = rest of row is
 	// 0x00, "!" = rest of row is 0xFF, ":" = row identical to the previous row.
 	cases := []struct {
-		name      string
-		bitmap    []byte
-		bpr, h    int
-		want      string
+		name   string
+		bitmap []byte
+		bpr, h int
+		want   string
 	}{
 		{
 			// row0 "FF00": 2xF -> "HF" (H=run 2), then rest zeros -> ","

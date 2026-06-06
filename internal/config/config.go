@@ -24,13 +24,13 @@ type Config struct {
 
 	// PDF->^GF render quality, calibrated on a real XP-423B (2026-06-06).
 	// See print-bridge/docs/hardware-spike-findings.md.
-	RenderThreshold int `json:"render_threshold"` // grayscale->1-bit cutoff; higher = darker/heavier
-	LabelDarkness   int `json:"label_darkness"`   // ^MD darkness boost (0 = printer default)
-	PrintSpeedIPS   int `json:"print_speed_ips"`  // ^PR print speed in ips; slower = darker (0 = default)
-	MarginXDots     int `json:"margin_x_dots"`    // ^FO left margin
-	MarginYDots     int `json:"margin_y_dots"`    // ^FO top margin (and symmetric bottom in ^LL)
-	PrintWidthDots  int `json:"print_width_dots"` // ^PW printhead width (832 for a 4" head)
-	RenderWidthDots int `json:"render_width_dots"`// pdftoppm -scale-to-x; keep < PrintWidthDots for margin
+	RenderThreshold int `json:"render_threshold"`  // grayscale->1-bit cutoff; higher = darker/heavier
+	LabelDarkness   int `json:"label_darkness"`    // ^MD darkness boost (0 = printer default)
+	PrintSpeedIPS   int `json:"print_speed_ips"`   // ^PR print speed in ips; slower = darker (0 = default)
+	MarginXDots     int `json:"margin_x_dots"`     // ^FO left margin
+	MarginYDots     int `json:"margin_y_dots"`     // ^FO top margin (and symmetric bottom in ^LL)
+	PrintWidthDots  int `json:"print_width_dots"`  // ^PW printhead width (832 for a 4" head)
+	RenderWidthDots int `json:"render_width_dots"` // pdftoppm -scale-to-x; keep < PrintWidthDots for margin
 }
 
 func Default() Config {
