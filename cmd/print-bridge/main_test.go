@@ -132,7 +132,7 @@ func TestMakeHealthExposesCupsError(t *testing.T) {
 func TestMakeHealthHeadOpenDegradesAndIsExposed(t *testing.T) {
 	fn := makeHealth(
 		fakeReach{online: true},
-		fakeHS{hs: printer.HostStatus{HeadOpen: true, QueuedFormats: 2, Raw2: "000,0,1,0,0,2,0,0,1334273,1,000"}, ok: true},
+		fakeHS{hs: printer.HostStatus{HeadOpen: true, QueuedFormats: 2, BatchRemaining: 1334273, Raw2: "000,0,1,0,0,2,0,0,01334273,1,000"}, ok: true},
 		fakeReasons{reasons: []string{"none"}},
 	)
 	status, body := fn(context.Background())
@@ -146,7 +146,10 @@ func TestMakeHealthHeadOpenDegradesAndIsExposed(t *testing.T) {
 	if m["queued_formats"] != 2 {
 		t.Errorf("queued_formats = %v, want 2", m["queued_formats"])
 	}
-	if m["host_status_2"] != "000,0,1,0,0,2,0,0,1334273,1,000" {
+	if m["host_status_2"] != "000,0,1,0,0,2,0,0,01334273,1,000" {
 		t.Errorf("host_status_2 = %v, want raw line 2 for diagnostics", m["host_status_2"])
+	}
+	if m["batch_remaining"] != 1334273 {
+		t.Errorf("batch_remaining = %v, want raw 1334273 (diagnostyka, surowa wartość)", m["batch_remaining"])
 	}
 }

@@ -261,3 +261,60 @@ func TestQueryHostStatusReassemblesChunkedReply(t *testing.T) {
 		t.Errorf("paper-out (field[1]=1) must survive chunked read, got %+v", hs)
 	}
 }
+
+// Zmierzone na XP-423B (2026-06-07, 2-etykietowy job): pole [8] linii 2 to
+// w trakcie batcha FLAGA busy, nie licznik — trzymało 00000001 przez cały
+// 2-etykietowy batch (nigdy 00000002) i spadło do 00000000 dokładnie przy
+// fizycznym zakończeniu OSTATNIEJ etykiety. Sygnał "ostatnia etykieta wyszła".
+func TestParseHostStatusReplyBatchRemainingDuringPrint(t *testing.T) {
+	reply := "\x02150,0,0,1219,000,0,0,0,000,0,0,0\x03\r\n" +
+		"\x02000,0,0,0,0,2,0,0,00000001,1,000\x03\r\n" +
+		"\x028888,0\x03\r\n"
+	hs, ok := ParseHostStatusReply(reply)
+	if !ok {
+		t.Fatal("mid-print frame must parse")
+	}
+	if hs.BatchRemaining != 1 {
+		t.Errorf("BatchRemaining = %d, want 1 (line2[8]=00000001)", hs.BatchRemaining)
+	}
+	if !hs.Draining() {
+		t.Error("batch in progress (1 label remaining) must be Draining()")
+	}
+	if !hs.Healthy() {
+		t.Error("printing is busy, not a fault")
+	}
+}
+
+func TestParseHostStatusReplyBatchDoneNotDraining(t *testing.T) {
+	hs, ok := ParseHostStatusReply(recordedIdleHS) // line2[8]=00000000
+	if !ok {
+		t.Fatal("idle frame must parse")
+	}
+	if hs.BatchRemaining != 0 || hs.Draining() {
+		t.Errorf("batch done: BatchRemaining=%d Draining=%v, want 0/false", hs.BatchRemaining, hs.Draining())
+	}
+}
+
+// Guard wiarygodności: po cyklu głowicy klon wpisuje w pole [8] licznik mediów
+// (~1.3M przy idle, reprodukowane 2x). Realny batch to małe wartości — wartości
+// powyżej progu NIE mogą gate'ować Draining() (wieczny drain po wymianie rolki
+// = fałszywy PRINT_TIMEOUT), ale surowa wartość zostaje w BatchRemaining do
+// diagnostyki.
+func TestDrainingIgnoresImplausibleBatchRemaining(t *testing.T) {
+	reply := "\x02150,0,0,1219,000,0,0,0,000,0,0,0\x03\r\n" +
+		"\x02000,0,0,0,0,2,0,0,01334273,1,000\x03\r\n" +
+		"\x028888,0\x03\r\n"
+	hs, ok := ParseHostStatusReply(reply)
+	if !ok {
+		t.Fatal("frame must parse")
+	}
+	if hs.BatchRemaining != 1334273 {
+		t.Errorf("BatchRemaining = %d, want raw 1334273 (diagnostyka)", hs.BatchRemaining)
+	}
+	if hs.Draining() {
+		t.Error("implausible batch counter (media odometer) must NOT make status Draining()")
+	}
+	if !hs.Healthy() {
+		t.Error("implausible counter must not affect Healthy()")
+	}
+}

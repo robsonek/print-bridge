@@ -104,14 +104,27 @@ Brak papieru w SPOCZYNKU → `~HS` NIE ustawia paper-out (poz2 zostaje 0) — ja
 gate'uje `Healthy()`, verify() i /health (`head_open`). **Zwalidowane na żywo:** otwarta
 głowica → `HeadOpen=true`/503, zamknięcie → flip na false w locie. Dodatkowo linia 1:
 [4]=`queued_formats` (backlog parsera; przy 2-label jobie pozostaje 000 — silnik parsuje
-od razu po dostarczeniu), [5]=`buffer_full`. **PUŁAPKA KLONA:** linia 2 pole [8]
-(„labels remaining in batch" wg spec Zebry) klon REPURPOSUJE na licznik mediów wpisywany po
-cyklu głowicy — reprodukcja 2×: idle `00000000` → cykl otwórz/zamknij → stabilne `01334273`
-(delta wczoraj→dziś = 1235 dots = dokładnie 1 etykieta `^LL`1219+16 — kalibracyjne wysunięcie
-po zamknięciu); później czyszczone do zera; jednorazowy odczyt przejściowy `1119879168` =
-wzorzec bitowy float 96.0 (mid-write). Wniosek: pole NIEZEROWE przy idle po każdej wymianie
-rolki — NIE używać semantycznie (gate na nim = wieczny drain → fałszywy PRINT_TIMEOUT);
-w /health tylko surowe `host_status_2`. Fizyczne „ostatnia etykieta wyszła" przez ~HS nieobserwowalne na
+od razu po dostarczeniu), [5]=`buffer_full`. **PODWÓJNE ŻYCIE pola [8] linii 2**
+(„labels remaining in batch" wg spec Zebry), oba zachowania zweryfikowane na sprzęcie:
+(a) **W TRAKCIE batcha = FLAGA busy, nie licznik** — eksperyment 2026-06-07 na 2-etykietowym
+jobie: trzymało `00000001` przez cały batch (nigdy `00000002`), spadło do `00000000` dokładnie
+przy fizycznym zakończeniu OSTATNIEJ etykiety (flaga 1→0 w +9.6 s, odpowiedź agenta 0.9 s
+później, etykieta fizycznie przed odpowiedzią — potwierdzone obserwacją). **Jedyny sygnał ~HS
+„ostatnia etykieta wyszła"**, używany w drain-poll verify() (BatchRemaining); E2E: `printed`
+po 10.49 s (= po fizycznym druku) vs 4.4 s przed zmianą;
+(b) **po cyklu głowicy przy idle** firmware wpisuje tam licznik mediów — reprodukcja 2×:
+idle `00000000` → cykl otwórz/zamknij → stabilne `01334273` (delta wczoraj→dziś = 1235 dots
+= dokładnie 1 etykieta `^LL`1219+16 — kalibracyjne wysunięcie po zamknięciu); później
+czyszczone do zera; przejściowy odczyt `1119879168` = bity float 96.0 (mid-write).
+**Guard:** Draining() ufa polu tylko < 10000 (realne batche są małe, licznik mediów ~10^6) —
+bez tego każdy druk po wymianie rolki wisiałby w wiecznym drenażu (fałszywy PRINT_TIMEOUT).
+Dzięki (a) status.cgi NIE jest potrzebny do potwierdzania fizycznego druku.
+**Potwierdzenie z vendor SDK** (knowledge/Linux_SDK_2.0.4, poza gitem): firmware modeluje
+status jako BITMASKĘ z bitem 5 = „Printing" (ZPL_GetPrinterStatus, manual §4.48) — pole [8]
+~HS odbija ten bit busy (stąd flaga 0/1, nie licznik); SDK ma też ZPL_GetPrinterOdometer
+(„meters") — zgodne z interpretacją wycieku licznika mediów. Kanały ESC!? i ~HQES NIE
+odpowiadają na tym egzemplarzu w trybie ZPL (test 2026-06-07) → ~HS to jedyny in-band
+kanał statusu (poza HTTP status.cgi). Fizyczne „ostatnia etykieta wyszła" przez ~HS nieobserwowalne na
 tym klonie → prawdziwy sygnał to `status.cgi` Printing→Ready (punkt 1 backlogu).
 
 ## Implikacje dla agenta `print-bridge` (do wdrożenia w kodzie)
