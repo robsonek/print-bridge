@@ -468,3 +468,49 @@ func TestVerifyHeadOpenFailsFast(t *testing.T) {
 		t.Errorf("fault must fail fast: hsCalls = %d, want 1", f.hsCalls)
 	}
 }
+
+// Zmierzone na sprzęcie (2026-06-07): pole [8] linii 2 ~HS = flaga batcha
+// (1 przez cały druk, 0 przy fizycznym zakończeniu ostatniej etykiety).
+// verify() musi czekać na zero — wtedy "printed" = ostatnia etykieta WYSZŁA
+// (E2E: odpowiedź 10.49 s vs 4.4 s przed zmianą, etykieta przed odpowiedzią).
+func TestVerifyWaitsForBatchCountdown(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobCompleted},
+		hsSeq: []hsResp{
+			{hs: HostStatus{BatchRemaining: 1}, ok: true},
+			{hs: HostStatus{BatchRemaining: 1}, ok: true},
+			{hs: HostStatus{}, ok: true}, // 00000000 — batch fizycznie skończony
+		},
+	}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e != nil {
+		t.Fatalf("batch countdown ending at 0 must yield printed, got err %v", e)
+	}
+	if res.Status != "printed" {
+		t.Errorf("status = %q, want printed", res.Status)
+	}
+	if f.hsCalls != 3 {
+		t.Errorf("verify must poll until countdown hits 0: hsCalls = %d, want 3", f.hsCalls)
+	}
+}
+
+// Guard wiarygodności w praktyce verify(): licznik mediów klona (~1.3M) w polu
+// [8] zaraz po wymianie rolki NIE może wstrzymywać potwierdzenia druku.
+func TestVerifyIgnoresMediaOdometerInBatchField(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobCompleted},
+		hs:        HostStatus{BatchRemaining: 1334273},
+		hsOK:      true,
+	}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e != nil {
+		t.Fatalf("odometer leak must not block printed, got err %v", e)
+	}
+	if res.Status != "printed" || f.hsCalls != 1 {
+		t.Errorf("want printed after 1 probe, got %+v after %d probes", res, f.hsCalls)
+	}
+}

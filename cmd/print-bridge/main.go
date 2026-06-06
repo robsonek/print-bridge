@@ -168,6 +168,9 @@ func makeHealth(reach reachabilityProbe, probe hostStatusProbe, cups cupsReasons
 			// queued_formats pokazuje, czy silnik ma jeszcze formaty w buforze.
 			body["head_open"] = hs.HeadOpen
 			body["queued_formats"] = hs.QueuedFormats
+			// surowa wartość pola [8] linii 2 (odliczanie batcha LUB licznik
+			// mediów po cyklu głowicy — patrz hoststatus.go)
+			body["batch_remaining"] = hs.BatchRemaining
 			body["host_status"] = hs.Raw
 			body["host_status_2"] = hs.Raw2
 		} else if hsErr != nil {

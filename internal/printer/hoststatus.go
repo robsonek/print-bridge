@@ -21,24 +21,47 @@ import (
 //	string 2: mmm,n,o,...             -> [2] head open (flip 0->1 verified
 //	          with the head physically open)
 //
-// String 2 field [8] ("labels remaining in batch" in the Zebra spec) is
-// deliberately NOT parsed: this clone firmware repurposes it as a media
-// odometer written after a head open/close cycle (reproduced twice on
-// hardware: idle 00000000 -> head cycle -> stable 01334273; day-over-day
-// delta exactly one label+gap, 1235 dots = ^LL 1219 + 16; cleared back to
-// zero later; one transient read of 1119879168 = float-96.0 bit pattern
-// mid-write). Whatever its exact meaning, it is NON-ZERO at idle after every
-// roll change -- gating Draining() on it would leave jobs "draining" forever
-// -> false PRINT_TIMEOUT. Raw2 keeps the raw string for diagnostics.
+// String 2 field [8] ("labels remaining in batch" in the Zebra spec) leads a
+// DOUBLE LIFE on this clone firmware (both behaviors verified on hardware):
+//
+//   - DURING a print batch it acts as a BUSY FLAG, not a count: a 2-label
+//     job held 00000001 for the whole batch (never 00000002) and dropped to
+//     00000000 exactly when the LAST label physically finished (measured
+//     2026-06-07: flag 1->0 at +9.6 s, agent response 0.9 s later, label
+//     physically out before the response — user-confirmed). The only ~HS
+//     signal of physical print completion;
+//   - AFTER a head open/close cycle, at idle, the firmware writes a media
+//     odometer into it (reproduced twice: 00000000 -> head cycle -> stable
+//     01334273; day-over-day delta exactly one label+gap, 1235 dots =
+//     ^LL 1219 + 16; cleared back to zero later; one transient read of
+//     1119879168 = float-96.0 bit pattern mid-write).
+//
+// Corroborated by the vendor Linux SDK (knowledge/Linux_SDK_2.0.4, not in
+// git): the firmware models status as a BITMASK with bit 5 = "Printing"
+// (ZPL_GetPrinterStatus) — field [8] mirrors that busy bit — and exposes
+// ZPL_GetPrinterOdometer ("meters"), matching the odometer leak. The SDK's
+// one-byte query channel (ESC ! ?) and ~HQES do NOT respond on this unit in
+// ZPL mode (tested 2026-06-07) — ~HS is the only in-band status channel.
+//
+// BatchRemaining therefore carries the RAW value and Draining() only trusts
+// it below maxPlausibleBatch: real batches are small (1..hundreds), the
+// odometer is ~10^6. Without that guard every print after a roll change
+// would "drain" forever -> false PRINT_TIMEOUT.
 type HostStatus struct {
-	PaperOut      bool
-	Paused        bool
-	HeadOpen      bool // ~HS string 2 field [2]
-	BufferFull    bool // ~HS string 1 field [5]
-	QueuedFormats int  // ~HS string 1 field [4]: formats waiting in the receive buffer
-	Raw           string
-	Raw2          string // ~HS string 2 ("" when the reply carried only string 1)
+	PaperOut       bool
+	Paused         bool
+	HeadOpen       bool // ~HS string 2 field [2]
+	BufferFull     bool // ~HS string 1 field [5]
+	QueuedFormats  int  // ~HS string 1 field [4]: formats waiting in the receive buffer
+	BatchRemaining int  // ~HS string 2 field [8]: raw; on this clone a 0/1 busy flag (see note)
+	Raw            string
+	Raw2           string // ~HS string 2 ("" when the reply carried only string 1)
 }
+
+// maxPlausibleBatch separates a genuine labels-remaining count (1..hundreds)
+// from the media-odometer values (~1.3M) the clone firmware leaves in the
+// same field after a head open/close cycle.
+const maxPlausibleBatch = 10000
 
 // Healthy reports physical readiness. PaperOut/Paused/HeadOpen are faults;
 // HeadOpen entered the gate once the string-2 wiring was confirmed on hardware
@@ -49,13 +72,15 @@ func (h HostStatus) Healthy() bool {
 }
 
 // Draining reports that the printer still holds undone work: formats waiting
-// in the receive buffer. With the paced LPD backend a CUPS job completes when
-// the DATA is delivered (~3 s), while the engine keeps printing for N×~5 s —
-// Draining()==false means at most the LAST format is still in the engine.
-// (The batch counter from string 2 would close that gap, but it is junk on
-// this firmware — see the HostStatus doc.)
+// in the receive buffer (parser backlog) or a plausible labels-remaining
+// count of the running batch. With the paced LPD backend a CUPS job completes
+// when the DATA is delivered (~3 s), while the engine keeps printing for
+// N×~5 s — the batch countdown reaching zero is the actual "last label
+// physically out" signal (captured on hardware). Implausibly large counts are
+// the clone's idle media-odometer leak and are ignored (HostStatus doc).
 func (h HostStatus) Draining() bool {
-	return h.QueuedFormats > 0
+	return h.QueuedFormats > 0 ||
+		(h.BatchRemaining > 0 && h.BatchRemaining < maxPlausibleBatch)
 }
 
 // ParseHostStatus parses string 1 of a Zebra ~HS reply (comma-separated).
@@ -107,6 +132,9 @@ func ParseHostStatusReply(reply string) (HostStatus, bool) {
 		fields := strings.Split(lines[1], ",")
 		if len(fields) > 2 {
 			hs.HeadOpen = fields[2] == "1"
+		}
+		if len(fields) > 8 {
+			hs.BatchRemaining, _ = strconv.Atoi(fields[8])
 		}
 	}
 	return hs, true
