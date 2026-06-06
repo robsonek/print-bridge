@@ -74,7 +74,10 @@ func main() {
 		KeyLock: server.NewKeyLock(),
 		Health:  makeHealth(reach, probe, cups),
 		Updater: func(tag string) error {
-			return update.SpawnUpdater(absUnder(exeDir, "update-bridge.sh"), tag)
+			script := updaterScript(exeDir)
+			logPath := absUnder(exeDir, "data/update.log")
+			log.Printf("admin/update: spawning updater tag=%s script=%s log=%s", tag, script, logPath)
+			return update.SpawnUpdater(script, logPath, tag)
 		},
 		// #27: server-side upper bound for the whole print op (exec lp + every
 		// JobState IPP round-trip + verify), so a hung cupsd `lp` held open by a
@@ -215,6 +218,17 @@ func cleanupLoop(store *idempotency.Store) {
 			log.Printf("idempotency cleanup: removed %d expired rows", n)
 		}
 	}
+}
+
+// updaterScript prefers the root-owned system copy (sudoers entry points at
+// it; outside /opt so the print-bridge user cannot rewrite a script it can
+// sudo). Falls back to a copy next to the binary for dev/manual runs.
+func updaterScript(exeDir string) string {
+	const system = "/usr/local/sbin/update-bridge.sh"
+	if _, err := os.Stat(system); err == nil {
+		return system
+	}
+	return absUnder(exeDir, "update-bridge.sh")
 }
 
 func executableDir() string {
