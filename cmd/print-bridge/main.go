@@ -52,7 +52,16 @@ func main() {
 	cups := printer.NewCUPSClient(cfg.CUPSQueue)
 	reach := &printer.SocketReachability{Addr: printerAddr, Timeout: 5 * time.Second, Reasons: cups.PrinterReasons}
 	probe := &printer.HSProbe{Addr: printerAddr, Timeout: 5 * time.Second}
-	render := printer.NewPDFRenderer(cfg.RenderDPI, cfg.LabelWidthMM, cfg.LabelHeightMM)
+	render := printer.NewPDFRenderer(printer.RenderOptions{
+		WidthMM:         cfg.LabelWidthMM,
+		Threshold:       uint8(cfg.RenderThreshold),
+		RenderWidthDots: cfg.RenderWidthDots,
+		PrintWidthDots:  cfg.PrintWidthDots,
+		Darkness:        cfg.LabelDarkness,
+		PrintRate:       cfg.PrintSpeedIPS,
+		MarginX:         cfg.MarginXDots,
+		MarginY:         cfg.MarginYDots,
+	})
 
 	p := &printer.Printer{
 		Reach: reach, Sub: cups, Poll: cups, Probe: probe, Render: render,

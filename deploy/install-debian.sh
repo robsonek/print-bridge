@@ -11,7 +11,12 @@ apt-get update
 apt-get install -y cups cups-client poppler-utils ufw
 
 # Raw queue (no PPD): CUPS must NOT touch the bytes — agent owns format.
-lpadmin -p "$QUEUE" -E -v "socket://${PRINTER_IP}:9100" -o raw
+# lpd:// NOT socket://: the XP-423B print-server drops its buffer on the FIN that
+# the CUPS socket backend sends right after the data, so socket:// reports
+# "completed" while nothing prints (verified on hardware, hardware-spike-findings.md).
+# The LPD protocol frames by byte count + ACKs, so the server receives the whole
+# job before the connection closes. "lp" is the print-server's LPD queue name.
+lpadmin -p "$QUEUE" -E -v "lpd://${PRINTER_IP}/lp" -o raw
 cupsenable "$QUEUE" || true
 cupsaccept "$QUEUE" || true
 

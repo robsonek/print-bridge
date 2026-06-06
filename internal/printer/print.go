@@ -68,7 +68,9 @@ func (p *Printer) Print(ctx context.Context, data []byte, copies int) (Result, *
 		return Result{}, apierr.New(apierr.CodeCUPSUnavailable, "lp submit failed: "+err.Error(), 503)
 	}
 
-	return p.pollAndVerify(ctx, jobID)
+	// Scale the confirm budget by label count: a multi-parcel job prints serially
+	// and would false-time-out on the base budget while still printing.
+	return p.pollAndVerify(ctx, jobID, p.ConfirmTimeoutPolls*labelCount(data))
 }
 
 // pollAndVerify is exported-for-resume via ResumeJob below; shared logic.
@@ -78,9 +80,9 @@ func (p *Printer) Print(ctx context.Context, data []byte, copies int) (Result, *
 // handler persists that id (SavePending) regardless of the error, so a retry with
 // the same Idempotency-Key resumes this job instead of resubmitting => no
 // duplicate physical label.
-func (p *Printer) pollAndVerify(ctx context.Context, jobID int) (Result, *apierr.Error) {
+func (p *Printer) pollAndVerify(ctx context.Context, jobID, maxPolls int) (Result, *apierr.Error) {
 	id := strconv.Itoa(jobID)
-	for i := 0; i < p.ConfirmTimeoutPolls; i++ {
+	for i := 0; i < maxPolls; i++ {
 		state, err := p.Poll.JobState(ctx, jobID)
 		if err != nil {
 			// #6: CUPS no longer has the job in its history (purged/evicted). For a
@@ -167,7 +169,9 @@ func (p *Printer) verify(ctx context.Context, jobID int) (Result, *apierr.Error)
 	return Result{Status: "printed", CUPSJobID: id}, nil
 }
 
-// ResumeJob continues polling an already-submitted job (resume-by-key path).
+// ResumeJob continues polling an already-submitted job (resume-by-key path). It
+// uses the base budget: on a retry the job has usually finished printing during
+// the interval, so JobState returns terminal almost immediately.
 func (p *Printer) ResumeJob(ctx context.Context, jobID int) (Result, *apierr.Error) {
-	return p.pollAndVerify(ctx, jobID)
+	return p.pollAndVerify(ctx, jobID, p.ConfirmTimeoutPolls)
 }
