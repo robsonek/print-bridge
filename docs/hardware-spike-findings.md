@@ -105,9 +105,13 @@ gate'uje `Healthy()`, verify() i /health (`head_open`). **Zwalidowane na żywo:*
 głowica → `HeadOpen=true`/503, zamknięcie → flip na false w locie. Dodatkowo linia 1:
 [4]=`queued_formats` (backlog parsera; przy 2-label jobie pozostaje 000 — silnik parsuje
 od razu po dostarczeniu), [5]=`buffer_full`. **PUŁAPKA KLONA:** linia 2 pole [8]
-(„labels remaining in batch" wg spec Zebry) trzyma ŚMIECI przy idle (nagrane: 00000000 →
-1119879168 → stabilne 1334273 po cyklu głowicy) — NIE używać semantycznie; w /health tylko
-surowe `host_status_2`. Fizyczne „ostatnia etykieta wyszła" przez ~HS nieobserwowalne na
+(„labels remaining in batch" wg spec Zebry) klon REPURPOSUJE na licznik mediów wpisywany po
+cyklu głowicy — reprodukcja 2×: idle `00000000` → cykl otwórz/zamknij → stabilne `01334273`
+(delta wczoraj→dziś = 1235 dots = dokładnie 1 etykieta `^LL`1219+16 — kalibracyjne wysunięcie
+po zamknięciu); później czyszczone do zera; jednorazowy odczyt przejściowy `1119879168` =
+wzorzec bitowy float 96.0 (mid-write). Wniosek: pole NIEZEROWE przy idle po każdej wymianie
+rolki — NIE używać semantycznie (gate na nim = wieczny drain → fałszywy PRINT_TIMEOUT);
+w /health tylko surowe `host_status_2`. Fizyczne „ostatnia etykieta wyszła" przez ~HS nieobserwowalne na
 tym klonie → prawdziwy sygnał to `status.cgi` Printing→Ready (punkt 1 backlogu).
 
 ## Implikacje dla agenta `print-bridge` (do wdrożenia w kodzie)

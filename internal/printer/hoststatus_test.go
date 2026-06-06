@@ -64,9 +64,11 @@ func TestHealthyGatesPaperOutPausedHeadOpen(t *testing.T) {
 // Ramka nagrana z realnego XP-423B w spoczynku (2026-06-06, port 9100, ~HS):
 // 3 linie STX..ETX CR LF. Linia 1[4]=formaty w buforze odbiorczym, [5]=buffer
 // full; linia 2[2]=head-open. UWAGA: pole [8] linii 2 ("labels remaining" wg
-// spec Zebry) na tym klonie trzyma ŚMIECI — nagrane przy idle kolejno:
-// 00000000, 1119879168, 1334273 (zmiana po cyklu otwórz/zamknij głowicy).
-// Dlatego NIE jest parsowane semantycznie — tylko surowe Raw2 do diagnostyki.
+// spec Zebry) klon używa jako licznika mediów wpisywanego po cyklu głowicy
+// (reprodukcja 2x: idle 00000000 -> cykl głowicy -> stabilne 01334273;
+// delta dzień-do-dnia = dokładnie 1 etykieta+gap, 1235 = ^LL 1219 + 16).
+// Niezerowe przy idle po każdej wymianie rolki -> NIE parsować semantycznie;
+// tylko surowe Raw2 do diagnostyki.
 const recordedIdleHS = "\x02150,0,0,1219,000,0,0,0,000,0,0,0\x03\r\n" +
 	"\x02000,0,0,0,0,2,0,0,00000000,1,000\x03\r\n" +
 	"\x028888,0\x03\r\n"
@@ -96,10 +98,11 @@ func TestParseHostStatusReplyRecordedIdleFrame(t *testing.T) {
 	}
 }
 
-// Regresja klonowego firmware: pole [8] linii 2 potrafi trzymać wielkie
-// śmieciowe wartości przy IDLE (nagrane na sprzęcie: 1334273 po cyklu
-// głowicy). Draining() NIE może na nim polegać — inaczej każdy druk kończyłby
-// się wiecznym drenażem i fałszywym PRINT_TIMEOUT.
+// Regresja klonowego firmware: pole [8] linii 2 jest niezerowe przy IDLE po
+// każdym cyklu głowicy/wymianie rolki (nagrane na sprzęcie: 01334273 —
+// licznik mediów, nie "labels remaining"). Draining() NIE może na nim polegać
+// — inaczej każdy druk po wymianie rolki kończyłby się wiecznym drenażem
+// i fałszywym PRINT_TIMEOUT.
 func TestParseHostStatusReplyIgnoresJunkLine2Counter(t *testing.T) {
 	reply := "\x02150,0,0,1219,000,0,0,0,000,0,0,0\x03\r\n" +
 		"\x02000,0,0,0,0,2,0,0,1334273,1,000\x03\r\n" +

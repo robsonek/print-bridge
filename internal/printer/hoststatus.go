@@ -22,11 +22,14 @@ import (
 //	          with the head physically open)
 //
 // String 2 field [8] ("labels remaining in batch" in the Zebra spec) is
-// deliberately NOT parsed: on this clone firmware it holds junk at idle
-// (recorded in one session: 00000000, then 1119879168, then a stable 1334273
-// after a head open/close cycle). Gating Draining() on it would leave every
-// job "draining" forever -> false PRINT_TIMEOUT. Raw2 keeps the raw string
-// for diagnostics.
+// deliberately NOT parsed: this clone firmware repurposes it as a media
+// odometer written after a head open/close cycle (reproduced twice on
+// hardware: idle 00000000 -> head cycle -> stable 01334273; day-over-day
+// delta exactly one label+gap, 1235 dots = ^LL 1219 + 16; cleared back to
+// zero later; one transient read of 1119879168 = float-96.0 bit pattern
+// mid-write). Whatever its exact meaning, it is NON-ZERO at idle after every
+// roll change -- gating Draining() on it would leave jobs "draining" forever
+// -> false PRINT_TIMEOUT. Raw2 keeps the raw string for diagnostics.
 type HostStatus struct {
 	PaperOut      bool
 	Paused        bool
