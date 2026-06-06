@@ -21,9 +21,11 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \
             go build -ldflags "-X github.com/robsonek/print-bridge/internal/version.Version=${VERSION}" \
             -o print-bridge ./cmd/print-bridge
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \
+            go build -o lpdpaced ./cmd/lpdpaced
           TARBALL="print-bridge-${VERSION}-linux-${{ matrix.arch }}.tar.gz"
           cp deploy/print-bridge.service deploy/install-debian.sh deploy/update-bridge.sh deploy/config.json.template .
-          tar -czf "$TARBALL" print-bridge print-bridge.service install-debian.sh update-bridge.sh config.json.template
+          tar -czf "$TARBALL" print-bridge lpdpaced print-bridge.service install-debian.sh update-bridge.sh config.json.template
           sha256sum "$TARBALL" > "$TARBALL.sha256"
       - name: Release
         uses: softprops/action-gh-release@v3

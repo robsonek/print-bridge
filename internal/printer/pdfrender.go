@@ -19,12 +19,12 @@ import (
 // real XP-423B (see hardware-spike-findings.md): render below the printhead width
 // for a margin, darker threshold + ^MD + slow ^PR against faint thermal print.
 type RenderOptions struct {
-	WidthMM         int    // guard: reject pages whose MediaBox width >> this (A4 on an A6 roll)
-	Threshold       uint8  // grayscale->1-bit cutoff (higher = darker/heavier)
-	RenderWidthDots int    // pdftoppm -scale-to-x target width
-	PrintWidthDots  int    // ^PW printhead width
-	Darkness        int    // ^MD
-	PrintRate       int    // ^PR ips
+	WidthMM          int   // guard: reject pages whose MediaBox width >> this (A4 on an A6 roll)
+	Threshold        uint8 // grayscale->1-bit cutoff (higher = darker/heavier)
+	RenderWidthDots  int   // pdftoppm -scale-to-x target width
+	PrintWidthDots   int   // ^PW printhead width
+	Darkness         int   // ^MD
+	PrintRate        int   // ^PR ips
 	MarginX, MarginY int   // ^FO left/top margin
 }
 

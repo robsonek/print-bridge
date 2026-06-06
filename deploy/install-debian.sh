@@ -10,13 +10,19 @@ INSTALL_DIR=/opt/print-bridge
 apt-get update
 apt-get install -y cups cups-client poppler-utils ufw
 
+# Paced LPD backend: the XP-423B print-server (10/100, Ethernut) drops segments
+# when a GbE sender bursts >40-60 KB/s; Linux then backs off retransmissions and
+# a multi-label job crawls for 30-50 s (= "second label prints a minute late",
+# hardware-spike-findings.md). Neither stock backend works: socket:// loses its
+# buffer on the early FIN ("completed" while nothing prints), lpd:// frames+ACKs
+# correctly but cannot pace. lpdpaced trickles the data file at rate= B/s.
+# Own binary in the backend dir (NOT a symlink into /opt): cupsd's AppArmor
+# profile may not allow executing from /opt, and a missing backend fails loudly.
+install -o root -g root -m 0755 ./lpdpaced /usr/lib/cups/backend/lpdpaced
+
 # Raw queue (no PPD): CUPS must NOT touch the bytes — agent owns format.
-# lpd:// NOT socket://: the XP-423B print-server drops its buffer on the FIN that
-# the CUPS socket backend sends right after the data, so socket:// reports
-# "completed" while nothing prints (verified on hardware, hardware-spike-findings.md).
-# The LPD protocol frames by byte count + ACKs, so the server receives the whole
-# job before the connection closes. "lp" is the print-server's LPD queue name.
-lpadmin -p "$QUEUE" -E -v "lpd://${PRINTER_IP}/lp" -o raw
+# "lp" is the print-server's LPD queue name.
+lpadmin -p "$QUEUE" -E -v "lpdpaced://${PRINTER_IP}/lp?rate=20000" -o raw
 cupsenable "$QUEUE" || true
 cupsaccept "$QUEUE" || true
 

@@ -158,18 +158,58 @@ głowicy (zweryfikowane). status.cgi to łapie (`Carriage Open`).
 - [x] ~~VM raw queue~~ / ~~skan barcode ZPL~~ / ~~idempotency resume-by-key~~ — ✅ (wyżej).
 
 **POZOSTAJE (osobny cykl):**
-- [ ] 🔴🔴 **NIEROZWIĄZANE — druga etykieta multi-label `^GF` drukuje z ~MINUTOWYM OPÓŹNIENIEM.**
-      Zweryfikowane 2026-06-06 na 2-paczkowym DPD PDF: **1. etykieta wychodzi OD RAZU, 2. dopiero po ~60 s**
-      (pojedynczy PDF JaFoti drukuje w 5.2 s — więc to NIE czas druku, lecz przerwa MIĘDZY etykietami).
-      Skalowanie confirm_timeout (30 s→60 s/2-label, ZAIMPLEMENTOWANE) złagodziło, ale 60 s wciąż za mało
-      → `PRINT_TIMEOUT` (druk i tak kończy się, idempotency+retry chroni). **Przyczyna NIEZNANA** —
-      hipotezy do zbadania w nowej sesji: print-server Ethernut buforuje/przetwarza drugi `^GF` z opóźnieniem;
-      LPD job z 2×`^XA` — drugi label czeka; może `^XB`/`^PQ`/separator między etykietami; może trzeba
-      SŁAĆ KAŻDĄ ETYKIETĘ OSOBNYM jobem (lp per label) zamiast jednego strumienia 2×`^XA`. **To główny
-      problem do rozwiązania.** Workaround tymczasowy: większy `confirm_timeout_sec` (np. 60→120/label) +
-      klient Laravel timeout > agent.
+- [x] ~~🔴🔴 druga etykieta multi-label `^GF` drukuje z ~minutowym opóźnieniem~~ —
+      **ROZWIĄZANE 2026-06-06 (sesja wieczorna), patrz sekcja „Multi-label delay — ROZWIĄZANE" niżej.**
+      Przyczyną NIE był multi-label: print-server gubi segmenty przy wysyłce >40-60 KB/s z GbE Linuxa,
+      Linux backoff'uje retransmisje i 66 KB wlecze się 30-50 s — silnik drukuje 1. etykietę z pierwszych
+      ~21 KB od razu, a 2. czeka na sączące się bajty. Fix: backend CUPS `lpdpaced` (pacing ~20 KB/s).
+      Żadna z pierwotnych hipotez (osobne joby per etykieta, separatory, `^PQ`) nie była trafna —
+      osobne joby po 33 KB też przekraczałyby próg patologii.
 - [ ] 🇵🇱 **Laravel L1: default `label_format = PDF` dla rynku PL** (ZPL gubi diakrytyki → błędny adres).
 - [ ] **Status: klient `status.cgi`** jako autorytatywne health (pkt 1); `~HS` uzupełnia (head-open linia 2).
 - [ ] Recovery filar 3: integracja `func=reset` (pkt 2) po fault+fix.
 - [ ] Agent E2E: self-update (`/admin/update`) — niesprawdzone.
 - [ ] `/codex:review` agenta po zmianach.
+- [ ] **VM: agent NIE jest zainstalowany w `/opt`** (spike uruchamiał binarkę ręcznie jako robson) —
+      docelowo `install-debian.sh` (instaluje też backend `lpdpaced` i przepina kolejkę).
+
+## Multi-label delay — ROZWIĄZANE (2026-06-06, sesja wieczorna)
+
+**Objaw:** 2-etykietowy DPD PDF: 1. etykieta od razu, 2. po ~60 s, agent → `PRINT_TIMEOUT`.
+
+**Diagnoza (bisekcja na sprzęcie, bez zgadywania):**
+
+| Test | Ścieżka | Wynik |
+|------|---------|-------|
+| T2 | Mac → LPD bezpośrednio (66.5 KB, 2×`^XA`) | **1.14 s**, ACK 0.19 s, obie etykiety pod rząd → multi-label NIE jest problemem |
+| T2b | VM → CUPS `lpd://` (ten sam plik) | **51 s**; `ss` Send-Q: drenaż po 3752 B w odstępach 1.4→9 s (backoff); 1. etykieta od razu, 2. po ~50 s |
+| V1 | VM → klon klienta z Maca (sndbuf 8K, ctrl-first, port efemeryczny) | **31 s** → protokół/port/bufor BEZ znaczenia; winna para Linux-stack ↔ Ethernut |
+| V3/V4 | VM, MSS 536 / bez window-scaling | wolno → to też nie to |
+| V5 | VM, **pacing 29 KB/s** | **2.31 s, zero stalli** ✅ |
+| V7/V8 | VM, pacing 40 / 60 KB/s | 40 czysto / 60 początek stalli → **klif między 40 a 60 KB/s** |
+
+**Root cause:** print-server (10/100, Ethernut) gubi segmenty przy wstrzykiwaniu >~40-60 KB/s
+z GbE Linuxa; Linux retransmituje z wykładniczym backoffem → 66 KB wlecze się 30-50 s. Silnik
+streamuje na bieżąco: 1. etykieta z pierwszych ~21 KB drukuje się od razu, 2. czeka na resztę.
+Bufor serwera to NIE limit (z Maca przyjął 66 KB w 1.1 s — macOS „przypadkiem" nie wpadał
+w patologię). Testy bez druku: payload `^XA^FX`+wypełniacz, zerwanie przed EOF → LPD odrzuca.
+
+**Fix:** backend CUPS **`lpdpaced`** (Go, `cmd/lpdpaced` + `internal/lpd`): LPD RFC 1179
+z pacingiem danych, default **20 KB/s** (2× margines od klifu; silnik @2 ips konsumuje
+~6.6 KB/s, więc pacing nie spowalnia druku). Device-uri: `lpdpaced://<ip>/lp?rate=20000`.
+Instalacja: `/usr/lib/cups/backend/lpdpaced` (root:root 0755, własna binarka — AppArmor;
+brak pliku = głośny błąd joba, nie cichy powrót patologii jak przy `tc`).
+
+**Walidacja na sprzęcie (2026-06-06):** ten sam 2-etykietowy job: transfer **51 s → 3.3 s**,
+Send-Q ~0; E2E przez agenta (`/print-jobs`, PDF→render→CUPS→lpdpaced): **4.4 s** do
+`{"status":"printed"}`, obie etykiety fizycznie pod rząd; `verify()` ~HS w trakcie druku
+odpowiedział poprawnie (brak fałszywego PRINTER_OFFLINE). Wcześniej: `PRINT_TIMEOUT` po 60 s.
+**Stress 4-label (133.6 KB, bocian240, peak bufora ~90 KB przy drenażu silnika):** completed
+w **7.1 s** (teoria 6.7 s), max Send-Q = 1448 B (jeden chunk, zero akumulacji), 4 etykiety
+fizycznie pod rząd → flow-control serwera przy zapełnianiu bufora działa czysto przy 20 KB/s.
+Joby >4 etykiet ekstrapolacja (peak bufora rośnie ~13.4 KB/s transferu) — przy problemach
+pierwszy ruch: obniżyć `rate=` w device-uri (silnik konsumuje ~6.6 KB/s).
+
+**Konsekwencja:** skalowanie `confirm_timeout` liczbą etykiet (labelCount) zostaje jako
+bezpiecznik, ale przestało być workaroundem — completed przychodzi po transferze (~3 s),
+nie po fizycznym druku.
