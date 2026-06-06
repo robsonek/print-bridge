@@ -31,9 +31,24 @@ mkdir -p "$INSTALL_DIR/data"
 
 install -m 0755 ./print-bridge "$INSTALL_DIR/print-bridge"
 install -m 0644 ./print-bridge.service /etc/systemd/system/print-bridge.service
-install -m 0755 ./update-bridge.sh "$INSTALL_DIR/update-bridge.sh"
 [ -f "$INSTALL_DIR/config.json" ] || install -m 0600 ./config.json.template "$INSTALL_DIR/config.json"
 chown -R print-bridge:print-bridge "$INSTALL_DIR"
+
+# Self-update: the updater is ROOT-OWNED and OUTSIDE /opt (which is chowned to
+# print-bridge) — a user must never be able to rewrite a script it can sudo
+# (root escalation). The agent spawns it via `sudo -n`; the sudoers drop-in is
+# validated with visudo before activation, a broken file is discarded rather
+# than bricking sudo.
+install -o root -g root -m 0755 ./update-bridge.sh /usr/local/sbin/update-bridge.sh
+printf 'print-bridge ALL=(root) NOPASSWD: /usr/local/sbin/update-bridge.sh *\n' > /etc/sudoers.d/print-bridge.tmp
+chmod 0440 /etc/sudoers.d/print-bridge.tmp
+if visudo -cf /etc/sudoers.d/print-bridge.tmp >/dev/null; then
+  mv /etc/sudoers.d/print-bridge.tmp /etc/sudoers.d/print-bridge
+else
+  echo "ERROR: sudoers nie przechodzi visudo -c" >&2
+  rm -f /etc/sudoers.d/print-bridge.tmp
+  exit 1
+fi
 
 # Firewall: only the the marketplace orchestrator egress IP may reach the agent port.
 ufw allow from "$ALLOW_CIDR" to any port 9443 proto tcp

@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Detached updater. Invoked as: /bin/sh update-bridge.sh <tag>
-# Replaces the binary, preserves config.json + data/, restarts, verifies /health.
+# Detached updater, runs as ROOT. Invoked by the agent as:
+#   sudo -n /usr/local/sbin/update-bridge.sh <tag>
+# (sudoers drop-in provisioned by install-debian.sh and self-healed below), or
+# manually: sudo update-bridge.sh <tag>.
+# Replaces the binary + CUPS backend, preserves config.json + data/, restarts,
+# verifies /health. The agent appends this script's output to data/update.log.
 TAG="${1:?tag required}"
+
+# Defense-in-depth: the agent validates the tag, but the sudoers entry also
+# allows DIRECT invocation by the print-bridge user — and the tag is
+# interpolated into the download URL, so it must never contain '/' or '..'.
+if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+  echo "ERROR: invalid tag ${TAG@Q} (expected semver like v1.2.3)" >&2
+  exit 1
+fi
+
 REPO="robsonek/print-bridge"
 INSTALL_DIR=/opt/print-bridge
+SELF=/usr/local/sbin/update-bridge.sh
+SUDOERS=/etc/sudoers.d/print-bridge
 ARCH="$(dpkg --print-architecture)" # amd64 / arm64
 ASSET="print-bridge-${TAG#v}-linux-${ARCH}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 
+echo "=== $(date -Is) update-bridge.sh start tag=${TAG} arch=${ARCH}"
 sleep 3
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -32,18 +48,37 @@ curl -fsSL "${URL}.sha256" -o "$TMP/${ASSET}.sha256"
 tar -xzf "$TMP/$ASSET" -C "$TMP"
 systemctl stop print-bridge
 install -m 0755 "$TMP/print-bridge" "$INSTALL_DIR/print-bridge"
-[ -f "$TMP/update-bridge.sh" ] && install -m 0755 "$TMP/update-bridge.sh" "$INSTALL_DIR/update-bridge.sh"
 # CUPS backend lives outside INSTALL_DIR and must stay root-owned (cupsd runs
 # backends only from /usr/lib/cups/backend; see install-debian.sh).
 [ -f "$TMP/lpdpaced" ] && install -o root -g root -m 0755 "$TMP/lpdpaced" /usr/lib/cups/backend/lpdpaced
+
+# Self-update + self-heal of the privilege chain (idempotent). The updater is
+# ROOT-OWNED and OUTSIDE /opt: /opt is chowned to print-bridge, and a user must
+# never be able to rewrite a script it can sudo (root escalation). The sudoers
+# entry is validated with visudo before activation; a broken file is discarded
+# rather than bricking sudo. Legacy /opt copy removed (pre-sudoers location).
+if [ -f "$TMP/update-bridge.sh" ]; then
+  install -o root -g root -m 0755 "$TMP/update-bridge.sh" "$SELF"
+fi
+rm -f "$INSTALL_DIR/update-bridge.sh"
+printf 'print-bridge ALL=(root) NOPASSWD: %s *\n' "$SELF" > "${SUDOERS}.tmp"
+chmod 0440 "${SUDOERS}.tmp"
+if visudo -cf "${SUDOERS}.tmp" >/dev/null; then
+  mv "${SUDOERS}.tmp" "$SUDOERS"
+else
+  echo "ERROR: wygenerowany sudoers nie przechodzi visudo -c; pomijam" >&2
+  rm -f "${SUDOERS}.tmp"
+fi
+
 chown -R print-bridge:print-bridge "$INSTALL_DIR"
 systemctl start print-bridge
 
 for i in $(seq 1 15); do
   sleep 2
   if curl -fsk "https://localhost:9443/api/v1/health" | grep -q "$(echo "${TAG#v}")"; then
-    echo "update to ${TAG} verified"
+    echo "=== $(date -Is) update to ${TAG} verified"
     exit 0
   fi
 done
-echo "warning: /health did not report version ${TAG#v} after restart" >&2
+echo "=== $(date -Is) warning: /health did not report version ${TAG#v} after restart" >&2
+exit 1
