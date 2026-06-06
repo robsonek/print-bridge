@@ -37,6 +37,9 @@ type Handlers struct {
 	KeyLock *KeyLock
 	Health  func(context.Context) (int, any)
 	Updater func(tag string) error
+	// Resetter wykonuje recovery print-servera (function.cgi?func=reset z
+	// guardem "nie w trakcie druku") — patrz printer.PrinterResetter.
+	Resetter func(context.Context) (printer.ResetOutcome, *apierr.Error)
 
 	// ConfirmTimeout (#27) is the server-side upper bound for the WHOLE print
 	// operation (exec lp + every JobState IPP round-trip + verify), not just the
@@ -193,6 +196,23 @@ func (h *Handlers) HealthHandler(w http.ResponseWriter, r *http.Request) {
 
 type updateRequest struct {
 	Tag string `json:"tag"`
+}
+
+// AdminPrinterReset is the explicit "wymieniłem papier — wznów" action for
+// the Laravel UI / support: clears latched faults (Paper Jam) and a wedged
+// 9100 responder; a buffered pending job resumes after the reset.
+func (h *Handlers) AdminPrinterReset(w http.ResponseWriter, r *http.Request) {
+	out, e := h.Resetter(r.Context())
+	if e != nil {
+		writeError(w, e)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "reset_ok",
+		"panel_before": out.PanelBefore,
+		"panel_after":  out.PanelAfter,
+		"hs_ok":        out.HSOk,
+	})
 }
 
 func (h *Handlers) AdminUpdate(w http.ResponseWriter, r *http.Request) {

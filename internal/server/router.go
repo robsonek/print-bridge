@@ -19,5 +19,6 @@ func Router(h *Handlers, token string) http.Handler {
 	mux.HandleFunc("POST /api/v1/print-jobs", h.PrintJobs)
 	mux.HandleFunc("GET /api/v1/health", h.HealthHandler)
 	mux.HandleFunc("POST /api/v1/admin/update", h.AdminUpdate)
+	mux.HandleFunc("POST /api/v1/admin/printer-reset", h.AdminPrinterReset)
 	return TokenAuth(token, mux)
 }

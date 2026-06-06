@@ -91,7 +91,7 @@ func TestMakeHealth(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fn := makeHealth(tc.reach, tc.hs, tc.reasons)
+			fn := makeHealth(tc.reach, tc.hs, tc.reasons, nil)
 			status, body := fn(context.Background())
 			if status != tc.wantStatus {
 				t.Errorf("status = %d, want %d", status, tc.wantStatus)
@@ -114,6 +114,7 @@ func TestMakeHealthExposesCupsError(t *testing.T) {
 		fakeReach{online: true},
 		fakeHS{ok: false},
 		fakeReasons{err: errors.New("connection refused")},
+		nil,
 	)
 	_, body := fn(context.Background())
 	m := body.(map[string]any)
@@ -134,6 +135,7 @@ func TestMakeHealthHeadOpenDegradesAndIsExposed(t *testing.T) {
 		fakeReach{online: true},
 		fakeHS{hs: printer.HostStatus{HeadOpen: true, QueuedFormats: 2, BatchRemaining: 1334273, Raw2: "000,0,1,0,0,2,0,0,01334273,1,000"}, ok: true},
 		fakeReasons{reasons: []string{"none"}},
+		nil,
 	)
 	status, body := fn(context.Background())
 	if status != http.StatusServiceUnavailable {
@@ -151,5 +153,26 @@ func TestMakeHealthHeadOpenDegradesAndIsExposed(t *testing.T) {
 	}
 	if m["batch_remaining"] != 1334273 {
 		t.Errorf("batch_remaining = %v, want raw 1334273 (diagnostyka, surowa wartość)", m["batch_remaining"])
+	}
+}
+
+// Watchdog auto-resetów musi być widoczny w /health (observability: ile razy
+// agent sam odwiesił zawieszony responder ~HS).
+func TestMakeHealthExposesWatchdogStats(t *testing.T) {
+	fn := makeHealth(
+		fakeReach{online: true},
+		fakeHS{hs: printer.HostStatus{}, ok: true},
+		fakeReasons{reasons: []string{"none"}},
+		func() printer.WatchdogStats {
+			return printer.WatchdogStats{AutoResets: 2, LastAutoReset: "2026-06-07T01:00:00Z"}
+		},
+	)
+	_, body := fn(context.Background())
+	m := body.(map[string]any)
+	if m["watchdog_auto_resets"] != 2 {
+		t.Errorf("watchdog_auto_resets = %v, want 2", m["watchdog_auto_resets"])
+	}
+	if m["watchdog_last_reset"] != "2026-06-07T01:00:00Z" {
+		t.Errorf("watchdog_last_reset = %v", m["watchdog_last_reset"])
 	}
 }
