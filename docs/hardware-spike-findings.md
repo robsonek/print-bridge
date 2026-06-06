@@ -99,9 +99,16 @@ Format (zaobserwowany, 82 B): `\x02<linia1>\x03\r\n\x02<linia2>\x03\r\n\x02<lini
 Brak papieru w SPOCZYNKU → `~HS` NIE ustawia paper-out (poz2 zostaje 0) — jak status.cgi (oba ślepe).
 `~HS` przeżywa power-cycle (odpowiada przed pierwszym drukiem, gdy drukarka raz weszła w ZPL).
 
-**⚠️ Luka agenta v0.1.0 (MED #10):** agent zwraca `host_status` = **tylko linia 1** i parsuje
-paper-out/pause. **head-open (linia 2 poz3) jest NIEWIDOCZNY** → agent /health = „ok" przy otwartej
-głowicy (zweryfikowane). status.cgi to łapie (`Carriage Open`).
+~~**⚠️ Luka agenta v0.1.0 (MED #10):** head-open (linia 2 poz3) NIEWIDOCZNY~~ — **DOMKNIĘTE
+2026-06-06 (sesja wieczorna):** `ParseHostStatusReply` czyta linię 2; `HeadOpen` (pole [2])
+gate'uje `Healthy()`, verify() i /health (`head_open`). **Zwalidowane na żywo:** otwarta
+głowica → `HeadOpen=true`/503, zamknięcie → flip na false w locie. Dodatkowo linia 1:
+[4]=`queued_formats` (backlog parsera; przy 2-label jobie pozostaje 000 — silnik parsuje
+od razu po dostarczeniu), [5]=`buffer_full`. **PUŁAPKA KLONA:** linia 2 pole [8]
+(„labels remaining in batch" wg spec Zebry) trzyma ŚMIECI przy idle (nagrane: 00000000 →
+1119879168 → stabilne 1334273 po cyklu głowicy) — NIE używać semantycznie; w /health tylko
+surowe `host_status_2`. Fizyczne „ostatnia etykieta wyszła" przez ~HS nieobserwowalne na
+tym klonie → prawdziwy sygnał to `status.cgi` Printing→Ready (punkt 1 backlogu).
 
 ## Implikacje dla agenta `print-bridge` (do wdrożenia w kodzie)
 
