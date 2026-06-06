@@ -92,7 +92,7 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID, maxPolls int) (Resul
 			// the recovery path with a hard, retryable CUPS_UNAVAILABLE that would
 			// false-requeue (double print) or false-alert a label that printed.
 			if errors.Is(err, ErrJobGone) {
-				return p.verify(ctx, jobID)
+				return p.verify(ctx, jobID, maxPolls-i-1)
 			}
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, "job poll failed: "+err.Error(), 503)
 		}
@@ -103,7 +103,7 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID, maxPolls int) (Resul
 		// an odzyskiwalny job and risk a duplicate on retry.
 		switch state {
 		case JobCompleted:
-			return p.verify(ctx, jobID)
+			return p.verify(ctx, jobID, maxPolls-i-1)
 		case JobCanceled:
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodeInvalidZPL, "job canceled by CUPS", 422)
 		case JobAborted:
@@ -132,41 +132,69 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID, maxPolls int) (Resul
 	return Result{CUPSJobID: id}, apierr.New(apierr.CodePrintTimeout, "job did not complete within confirm timeout", 503)
 }
 
-func (p *Printer) verify(ctx context.Context, jobID int) (Result, *apierr.Error) {
-	hs, ok, err := p.Probe.HostStatus(ctx)
+// verify confirms the PHYSICAL print after CUPS reports the job done. With the
+// paced LPD backend a CUPS job completes when the data is DELIVERED (~3 s),
+// while the engine keeps printing for N×~5 s — so verify polls ~HS until the
+// receive buffer and the running batch are drained (Draining()==false), within
+// the budget of confirm polls left over from the job-state loop.
+//
+// #2 (amended for drain): a TRANSPORT failure of one probe no longer returns an
+// immediate PRINTER_OFFLINE — the single-threaded print-server may simply be
+// busy printing (hardware finding: "timeout during print means busy, not
+// down"), so the probe retries within the budget. Only a budget exhausted
+// without a single ~HS answer is reported as PRINTER_OFFLINE; resume-by-key +
+// a completed CUPS job mean a retry re-verifies (without reprinting).
+func (p *Printer) verify(ctx context.Context, jobID, budget int) (Result, *apierr.Error) {
 	id := strconv.Itoa(jobID)
+	if budget < 1 {
+		budget = 1
+	}
+	var lastErr error
+	answered := false
+	for i := 0; i < budget; i++ {
+		hs, ok, err := p.Probe.HostStatus(ctx)
+		switch {
+		case err != nil:
+			lastErr = err // busy or unreachable — retry within budget
 
-	// #2: split two materially different ~HS probe outcomes that used to share
-	// one branch.
-	//
-	// err != nil  => TRANSPORT failure (dial/write/read fail): the printer became
-	// UNREACHABLE between CUPS JobCompleted (bytes flushed to the socket buffer)
-	// and this ~HS probe. The socket:9100 backend gives CUPS no physical-print
-	// back-channel, so the physical print state is UNKNOWN -> we must NOT claim
-	// "printed". Return retryable PRINTER_OFFLINE; resume-by-key + a completed
-	// CUPS job mean a retry will re-verify via ~HS (without reprinting) once the
-	// printer is back.
-	if err != nil {
+		// The printer ANSWERED but the ~HS reply was unparseable/unsupported.
+		// It is alive and reachable, it just doesn't speak ~HS intelligibly ->
+		// graceful degrade to best-effort "printed" (as designed).
+		case !ok:
+			return Result{Status: "printed", CUPSJobID: id}, nil
+
+		case hs.PaperOut:
+			return Result{CUPSJobID: id}, apierr.New(apierr.CodeOutOfPaper, "printer reports media-empty (~HS)", 503)
+		case hs.Paused:
+			return Result{CUPSJobID: id}, apierr.New(apierr.CodeQueuePaused, "printer paused (~HS)", 503)
+		case hs.HeadOpen:
+			// MED #10 closed: head/cover open lives in ~HS string 2 and used to
+			// be invisible (false "printed" with the head physically open).
+			return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline, "printer head/cover open (~HS)", 503)
+		case !hs.Healthy():
+			return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline, "printer fault (~HS): "+hs.Raw, 503)
+
+		// Drained: no formats waiting, no labels remaining -> physically printed.
+		case !hs.Draining():
+			return Result{Status: "printed", CUPSJobID: id}, nil
+
+		default:
+			answered = true // healthy, still printing the batch
+		}
+		if i < budget-1 && p.PollInterval > 0 {
+			select {
+			case <-ctx.Done():
+				return Result{CUPSJobID: id}, apierr.New(apierr.CodePrintTimeout, "context canceled while verifying", 503)
+			case <-time.After(p.PollInterval):
+			}
+		}
+	}
+	if !answered && lastErr != nil {
 		return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline,
-			"printer unreachable during ~HS verification: "+err.Error(), 503)
+			"printer unreachable during ~HS verification: "+lastErr.Error(), 503)
 	}
-
-	// err == nil && !ok => the printer ANSWERED but the ~HS reply was unparseable
-	// / unsupported. The printer is alive and reachable, it just doesn't speak ~HS
-	// intelligibly -> graceful degrade to best-effort "printed" (as designed).
-	if !ok {
-		return Result{Status: "printed", CUPSJobID: id}, nil
-	}
-
-	switch {
-	case hs.PaperOut:
-		return Result{CUPSJobID: id}, apierr.New(apierr.CodeOutOfPaper, "printer reports media-empty (~HS)", 503)
-	case hs.Paused:
-		return Result{CUPSJobID: id}, apierr.New(apierr.CodeQueuePaused, "printer paused (~HS)", 503)
-	case !hs.Healthy():
-		return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline, "printer fault (~HS): "+hs.Raw, 503)
-	}
-	return Result{Status: "printed", CUPSJobID: id}, nil
+	return Result{CUPSJobID: id}, apierr.New(apierr.CodePrintTimeout,
+		"labels still printing (~HS draining) at confirm budget; retry with the same Idempotency-Key re-verifies", 503)
 }
 
 // ResumeJob continues polling an already-submitted job (resume-by-key path). It

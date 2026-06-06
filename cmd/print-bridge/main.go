@@ -164,7 +164,12 @@ func makeHealth(reach reachabilityProbe, probe hostStatusProbe, cups cupsReasons
 		if ok {
 			body["paper_out"] = hs.PaperOut
 			body["paused"] = hs.Paused
+			// MED #10: head-open żyje w linii 2 ~HS (potwierdzone na sprzęcie);
+			// queued_formats pokazuje, czy silnik ma jeszcze formaty w buforze.
+			body["head_open"] = hs.HeadOpen
+			body["queued_formats"] = hs.QueuedFormats
 			body["host_status"] = hs.Raw
+			body["host_status_2"] = hs.Raw2
 		} else if hsErr != nil {
 			// Distinguish a probe transport failure/timeout from "printer doesn't
 			// speak ~HS" (alive but unparseable).

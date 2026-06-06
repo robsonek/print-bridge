@@ -124,3 +124,29 @@ func TestMakeHealthExposesCupsError(t *testing.T) {
 		t.Error("body must include cups_error when PrinterReasons fails")
 	}
 }
+
+// MED #10 domknięte: /health musi raportować head_open (z linii 2 ~HS) oraz
+// liczniki drenażu (queued_formats, labels_remaining) i degradować się przy
+// otwartej głowicy — wcześniej zwracał "ok" z fizycznie otwartą pokrywą
+// (zweryfikowane na sprzęcie w spike'u).
+func TestMakeHealthHeadOpenDegradesAndIsExposed(t *testing.T) {
+	fn := makeHealth(
+		fakeReach{online: true},
+		fakeHS{hs: printer.HostStatus{HeadOpen: true, QueuedFormats: 2, Raw2: "000,0,1,0,0,2,0,0,1334273,1,000"}, ok: true},
+		fakeReasons{reasons: []string{"none"}},
+	)
+	status, body := fn(context.Background())
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (head open is a fault)", status)
+	}
+	m := body.(map[string]any)
+	if m["head_open"] != true {
+		t.Errorf("head_open = %v, want true", m["head_open"])
+	}
+	if m["queued_formats"] != 2 {
+		t.Errorf("queued_formats = %v, want 2", m["queued_formats"])
+	}
+	if m["host_status_2"] != "000,0,1,0,0,2,0,0,1334273,1,000" {
+		t.Errorf("host_status_2 = %v, want raw line 2 for diagnostics", m["host_status_2"])
+	}
+}

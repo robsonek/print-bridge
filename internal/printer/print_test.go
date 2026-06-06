@@ -8,6 +8,12 @@ import (
 	"github.com/robsonek/print-bridge/internal/apierr"
 )
 
+type hsResp struct {
+	hs  HostStatus
+	ok  bool
+	err error
+}
+
 type fakeBackend struct {
 	reachable   bool
 	paused      bool
@@ -16,6 +22,8 @@ type fakeBackend struct {
 	hs          HostStatus
 	hsOK        bool
 	hsErr       error
+	hsSeq       []hsResp // optional scripted ~HS sequence (drain tests); last entry sticky
+	hsCalls     int      // number of HostStatus invocations
 	submitErr   error
 	rendered    []byte
 	renderErr   error
@@ -42,6 +50,14 @@ func (f *fakeBackend) JobState(context.Context, int) (int, error) {
 	return s, nil
 }
 func (f *fakeBackend) HostStatus(context.Context) (HostStatus, bool, error) {
+	f.hsCalls++
+	if len(f.hsSeq) > 0 {
+		r := f.hsSeq[0]
+		if len(f.hsSeq) > 1 {
+			f.hsSeq = f.hsSeq[1:]
+		}
+		return r.hs, r.ok, r.err
+	}
 	return f.hs, f.hsOK, f.hsErr
 }
 func (f *fakeBackend) PDFToZPL(context.Context, []byte) ([]byte, error) {
@@ -362,5 +378,93 @@ func TestPrintSubmitFailureNoCUPSJobID(t *testing.T) {
 	}
 	if res.CUPSJobID != "" {
 		t.Errorf("submit failure must NOT carry a job id, got %q", res.CUPSJobID)
+	}
+}
+
+// --- Drain-poll w verify(): po lpdpaced CUPS-owe "completed" = dane dostarczone
+// (~3 s), a silnik drukuje jeszcze N×~5 s. verify() polluje ~HS aż bufor i batch
+// się opróżni (QueuedFormats==0) — dopiero wtedy "printed"
+// znaczy FIZYCZNIE wydrukowane. Pola potwierdzone na sprzęcie 2026-06-06.
+
+func TestVerifyWaitsForPhysicalDrain(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobCompleted},
+		hsSeq: []hsResp{
+			{hs: HostStatus{QueuedFormats: 2}, ok: true},
+			{hs: HostStatus{QueuedFormats: 1}, ok: true},
+			{hs: HostStatus{}, ok: true}, // opróżnione
+		},
+	}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e != nil {
+		t.Fatalf("drain ending idle must yield printed, got err %v", e)
+	}
+	if res.Status != "printed" {
+		t.Errorf("status = %q, want printed", res.Status)
+	}
+	if f.hsCalls != 3 {
+		t.Errorf("verify must poll ~HS until drained: hsCalls = %d, want 3", f.hsCalls)
+	}
+}
+
+// Zmiana kontraktu #2: błąd transportu ~HS w trakcie drenażu = print-server
+// zajęty drukiem (jednowątkowy — findings: "timeout-w-trakcie-druku to busy,
+// nie down"), więc RETRY w ramach budżetu zamiast natychmiastowego
+// PRINTER_OFFLINE. Dopiero budżet wyczerpany bez ŻADNEJ odpowiedzi -> OFFLINE.
+func TestVerifyTransportErrorDuringDrainIsBusyNotOffline(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobCompleted},
+		hsSeq: []hsResp{
+			{err: errors.New("dial timeout")},
+			{err: errors.New("dial timeout")},
+			{hs: HostStatus{}, ok: true},
+		},
+	}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e != nil {
+		t.Fatalf("transient ~HS errors during drain must retry, got err %v", e)
+	}
+	if res.Status != "printed" {
+		t.Errorf("status = %q, want printed after probe recovers", res.Status)
+	}
+}
+
+func TestVerifyStillDrainingAtBudgetIsPrintTimeout(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobCompleted},
+		// sticky: drukarka bez końca raportuje niedokończony batch
+		hsSeq: []hsResp{{hs: HostStatus{QueuedFormats: 1}, ok: true}},
+	}
+	p := newPrinter(f)
+	res, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodePrintTimeout {
+		t.Fatalf("still-draining at budget end must be PRINT_TIMEOUT (retryable, resume re-verifies), got %v", e)
+	}
+	if res.CUPSJobID != "7" {
+		t.Errorf("timeout Result must carry job id 7 for resume-by-key, got %q", res.CUPSJobID)
+	}
+}
+
+// MED #10 domknięte: otwarta głowica (linia 2 ~HS) musi być faultem w verify,
+// nie cichym "printed".
+func TestVerifyHeadOpenFailsFast(t *testing.T) {
+	f := &fakeBackend{
+		reachable: true,
+		states:    []int{JobCompleted},
+		hs:        HostStatus{HeadOpen: true},
+		hsOK:      true,
+	}
+	p := newPrinter(f)
+	_, e := p.Print(context.Background(), []byte("^XA^XZ"), 1)
+	if e == nil || e.Code != apierr.CodePrinterOffline {
+		t.Fatalf("head-open must be a fault (PRINTER_OFFLINE), got %v", e)
+	}
+	if f.hsCalls != 1 {
+		t.Errorf("fault must fail fast: hsCalls = %d, want 1", f.hsCalls)
 	}
 }
