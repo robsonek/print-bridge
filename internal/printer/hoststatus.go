@@ -30,11 +30,15 @@ import (
 //     2026-06-07: flag 1->0 at +9.6 s, agent response 0.9 s later, label
 //     physically out before the response — user-confirmed). The only ~HS
 //     signal of physical print completion;
-//   - AFTER a head open/close cycle, at idle, the firmware writes a media
-//     odometer into it (reproduced twice: 00000000 -> head cycle -> stable
-//     01334273; day-over-day delta exactly one label+gap, 1235 dots =
-//     ^LL 1219 + 16; cleared back to zero later; one transient read of
-//     1119879168 = float-96.0 bit pattern mid-write).
+//   - AT BOOT and after a head open/close cycle the firmware loads a
+//     PERSISTENT media odometer into it (verified: 00000000 before a power
+//     cycle, 01334273 right after boot — NVRAM-backed; also reproduced twice
+//     via head cycle; day-over-day delta exactly one label+gap, 1235 dots =
+//     ^LL 1219 + 16; the first print flips the field to batch-flag
+//     semantics and it reads 0 at idle from then on; one transient read of
+//     1119879168 = float-96.0 bit pattern mid-write). So the junk value is
+//     present after EVERY printer restart until the first print — the
+//     plausibility guard is load-bearing, not an edge case.
 //
 // Corroborated by the vendor Linux SDK (knowledge/Linux_SDK_2.0.4, not in
 // git): the firmware models status as a BITMASK with bit 5 = "Printing"
