@@ -192,7 +192,14 @@ tym klonie → prawdziwy sygnał to `status.cgi` Printing→Ready (punkt 1 backl
 - [ ] 🇵🇱 **Laravel L1: default `label_format = PDF` dla rynku PL** (ZPL gubi diakrytyki → błędny adres).
 - [ ] **Status: klient `status.cgi`** jako autorytatywne health (pkt 1); `~HS` uzupełnia (head-open linia 2).
 - [ ] Recovery filar 3: integracja `func=reset` (pkt 2) po fault+fix.
-- [ ] Agent E2E: self-update (`/admin/update`) — niesprawdzone.
+- [ ] 🔴 **Self-update (`/admin/update`) NIE DZIAŁA na obecnej instalacji — przetestowane 2026-06-07:**
+      endpoint zwraca 202 "updating", ale odłączony updater umiera PO CICHU na `systemctl stop`
+      (unit działa jako `User=print-bridge` bez roota; update-bridge.sh wymaga roota: systemctl,
+      /usr/lib/cups/backend). Dwie luki do naprawy: (1) uprawnienia — sudoers drop-in
+      `print-bridge ALL=(root) NOPASSWD: /opt/print-bridge/update-bridge.sh` + spawn przez sudo,
+      (2) updater nie loguje nigdzie porażki (wyjście idzie w próżnię — przekierować do pliku/journala).
+      Workaround: `sudo bash /opt/print-bridge/update-bridge.sh <tag>` przez SSH (tak wykonano
+      update v0.2.0→v0.3.0; skrypt poprawnie wymienił binarkę, backend lpdpaced i zweryfikował /health).
 - [ ] `/codex:review` agenta po zmianach.
 - [ ] **VM: agent NIE jest zainstalowany w `/opt`** (spike uruchamiał binarkę ręcznie jako robson) —
       docelowo `install-debian.sh` (instaluje też backend `lpdpaced` i przepina kolejkę).
