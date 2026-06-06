@@ -112,10 +112,14 @@ przy fizycznym zakończeniu OSTATNIEJ etykiety (flaga 1→0 w +9.6 s, odpowiedź
 później, etykieta fizycznie przed odpowiedzią — potwierdzone obserwacją). **Jedyny sygnał ~HS
 „ostatnia etykieta wyszła"**, używany w drain-poll verify() (BatchRemaining); E2E: `printed`
 po 10.49 s (= po fizycznym druku) vs 4.4 s przed zmianą;
-(b) **po cyklu głowicy przy idle** firmware wpisuje tam licznik mediów — reprodukcja 2×:
-idle `00000000` → cykl otwórz/zamknij → stabilne `01334273` (delta wczoraj→dziś = 1235 dots
-= dokładnie 1 etykieta `^LL`1219+16 — kalibracyjne wysunięcie po zamknięciu); później
-czyszczone do zera; przejściowy odczyt `1119879168` = bity float 96.0 (mid-write).
+(b) **przy BOOCIE i po cyklu głowicy** firmware ładuje tam PERSYSTENTNY licznik mediów
+(NVRAM): zweryfikowane power-cycle 2026-06-07 — przed restartem `00000000`, zaraz po boocie
+`01334273`; reprodukcja 2× także cyklem głowicy (delta wczoraj→dziś = 1235 dots = dokładnie
+1 etykieta `^LL`1219+16); pierwszy druk przełącza pole na semantykę flagi batcha i od tego
+momentu idle czyta 0; przejściowy odczyt `1119879168` = bity float 96.0 (mid-write).
+Czyli śmieciowa wartość jest w polu PO KAŻDYM restarcie drukarki aż do pierwszego druku.
+Przy okazji power-cycle POTWIERDZONO: ~HS odpowiada od razu po boocie (zatrzask ZPL w NVRAM
+przeżywa restart — „milczenie" dotyczy wyłącznie drukarki fabrycznie świeżej).
 **Guard:** Draining() ufa polu tylko < 10000 (realne batche są małe, licznik mediów ~10^6) —
 bez tego każdy druk po wymianie rolki wisiałby w wiecznym drenażu (fałszywy PRINT_TIMEOUT).
 Dzięki (a) status.cgi NIE jest potrzebny do potwierdzania fizycznego druku.
