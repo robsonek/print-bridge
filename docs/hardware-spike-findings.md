@@ -192,14 +192,17 @@ tym klonie → prawdziwy sygnał to `status.cgi` Printing→Ready (punkt 1 backl
 - [ ] 🇵🇱 **Laravel L1: default `label_format = PDF` dla rynku PL** (ZPL gubi diakrytyki → błędny adres).
 - [ ] **Status: klient `status.cgi`** jako autorytatywne health (pkt 1); `~HS` uzupełnia (head-open linia 2).
 - [ ] Recovery filar 3: integracja `func=reset` (pkt 2) po fault+fix.
-- [ ] 🔴 **Self-update (`/admin/update`) NIE DZIAŁA na obecnej instalacji — przetestowane 2026-06-07:**
-      endpoint zwraca 202 "updating", ale odłączony updater umiera PO CICHU na `systemctl stop`
-      (unit działa jako `User=print-bridge` bez roota; update-bridge.sh wymaga roota: systemctl,
-      /usr/lib/cups/backend). Dwie luki do naprawy: (1) uprawnienia — sudoers drop-in
-      `print-bridge ALL=(root) NOPASSWD: /opt/print-bridge/update-bridge.sh` + spawn przez sudo,
-      (2) updater nie loguje nigdzie porażki (wyjście idzie w próżnię — przekierować do pliku/journala).
-      Workaround: `sudo bash /opt/print-bridge/update-bridge.sh <tag>` przez SSH (tak wykonano
-      update v0.2.0→v0.3.0; skrypt poprawnie wymienił binarkę, backend lpdpaced i zweryfikował /health).
+- [x] ~~Self-update (`/admin/update`)~~ — **NAPRAWIONE i zweryfikowane E2E na sprzęcie
+      (2026-06-07, v0.3.1+v0.3.2)**. Trzy luki znalezione testami na żywo: (1) uprawnienia —
+      unit bez roota; fix: sudoers drop-in NOPASSWD na ROOT-OWNED `/usr/local/sbin/update-bridge.sh`
+      (poza /opt — user nie może podmienić skryptu, na który ma sudo) + spawn `sudo -n`;
+      (2) brak logów — fix: wyjście updatera → `data/update.log` (nagłówki z timestampem);
+      (3) **kill-by-cgroup** — Setpgid nie chroni przed `systemctl stop` (zabija po cgroupie;
+      updater umierał na własnym stopie, log urwany po sha256); fix: detekcja cgroupy serwisu
+      w `/proc/self/cgroup` + re-exec przez `systemd-run --collect` do transient unitu
+      z `StandardOutput=append:` do logu. E2E: POST /admin/update → 202 → re-exec → restart →
+      `update to v0.3.2 verified` w 6 s, serwis active. Walidacja taga też w skrypcie
+      (defense-in-depth: tag wchodzi do URL-a, sudoers pozwala wołać skrypt bezpośrednio).
 - [ ] `/codex:review` agenta po zmianach.
 - [ ] **VM: agent NIE jest zainstalowany w `/opt`** (spike uruchamiał binarkę ręcznie jako robson) —
       docelowo `install-debian.sh` (instaluje też backend `lpdpaced` i przepina kolejkę).
