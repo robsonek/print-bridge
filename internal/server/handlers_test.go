@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -356,5 +357,42 @@ func TestHealthEndpoint(t *testing.T) {
 	h.HealthHandler(rec, req)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "ok") {
 		t.Errorf("health = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminPrinterResetHappyPath(t *testing.T) {
+	h := &Handlers{
+		Resetter: func(ctx context.Context) (printer.ResetOutcome, *apierr.Error) {
+			return printer.ResetOutcome{PanelBefore: "Paper Jam", PanelAfter: "Ready", HSOk: true}, nil
+		},
+	}
+	req := httptest.NewRequest("POST", "/api/v1/admin/printer-reset", nil)
+	rec := httptest.NewRecorder()
+	h.AdminPrinterReset(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"status":"reset_ok"`, `"panel_after":"Ready"`, `"hs_ok":true`, `"panel_before":"Paper Jam"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body %q bez %q", body, want)
+		}
+	}
+}
+
+func TestAdminPrinterResetBusyPropagatesError(t *testing.T) {
+	h := &Handlers{
+		Resetter: func(ctx context.Context) (printer.ResetOutcome, *apierr.Error) {
+			return printer.ResetOutcome{}, apierr.New(apierr.CodePrinterBusy, "druk w toku", 409)
+		},
+	}
+	req := httptest.NewRequest("POST", "/api/v1/admin/printer-reset", nil)
+	rec := httptest.NewRecorder()
+	h.AdminPrinterReset(rec, req)
+	if rec.Code != 409 {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "PRINTER_BUSY") {
+		t.Errorf("body %q bez PRINTER_BUSY", rec.Body.String())
 	}
 }

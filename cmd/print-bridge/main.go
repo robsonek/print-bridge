@@ -68,11 +68,31 @@ func main() {
 		PollInterval: time.Second, ConfirmTimeoutPolls: cfg.ConfirmTimeoutSec,
 	}
 
+	// Recovery print-servera: panel HTTP (status.cgi / function.cgi) jest
+	// niezależny od respondera 9100 i działa w każdym trybie języka.
+	panel := &printer.WebPanel{BaseURL: fmt.Sprintf("http://%s", cfg.PrinterIP)}
+	resetter := &printer.PrinterResetter{Panel: panel, Probe: probe, PollInterval: 2 * time.Second, MaxPolls: 15}
+	// Watchdog: samonaprawa zawieszonego ~HS (sygnatura: transport-erry przy
+	// żywym TCP; guardy: Ready-not-Printing, rate-limit) — zaobserwowane i
+	// zweryfikowane na sprzęcie 2026-06-07.
+	watchdog := &printer.Watchdog{
+		Probe: probe, Reach: reach, Panel: panel,
+		ResetFn: func(ctx context.Context) (printer.ResetOutcome, error) {
+			out, e := resetter.Reset(ctx)
+			if e != nil {
+				return out, e
+			}
+			return out, nil
+		},
+		Interval: time.Minute, FailThreshold: 3, MinGap: 15 * time.Minute,
+	}
+
 	h := &server.Handlers{
-		Printer: p,
-		Store:   server.NewStoreAdapter(store),
-		KeyLock: server.NewKeyLock(),
-		Health:  makeHealth(reach, probe, cups),
+		Printer:  p,
+		Store:    server.NewStoreAdapter(store),
+		KeyLock:  server.NewKeyLock(),
+		Health:   makeHealth(reach, probe, cups, watchdog.Stats),
+		Resetter: resetter.Reset,
 		Updater: func(tag string) error {
 			script := updaterScript(exeDir)
 			logPath := absUnder(exeDir, "data/update.log")
@@ -109,6 +129,7 @@ func main() {
 	// drain on SIGINT/SIGTERM, then close the store explicitly.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go watchdog.Run(ctx)
 
 	srvErr := make(chan error, 1)
 	go func() {
@@ -153,9 +174,16 @@ type cupsReasonsProbe interface {
 	PrinterReasons(context.Context) ([]string, error)
 }
 
-func makeHealth(reach reachabilityProbe, probe hostStatusProbe, cups cupsReasonsProbe) func(context.Context) (int, any) {
+func makeHealth(reach reachabilityProbe, probe hostStatusProbe, cups cupsReasonsProbe, wdStats func() printer.WatchdogStats) func(context.Context) (int, any) {
 	return func(ctx context.Context) (int, any) {
 		body := map[string]any{"version": version.Version}
+		if wdStats != nil {
+			st := wdStats()
+			body["watchdog_auto_resets"] = st.AutoResets
+			if st.LastAutoReset != "" {
+				body["watchdog_last_reset"] = st.LastAutoReset
+			}
+		}
 
 		online, reachErr := reach.Reachable(ctx)
 		body["printer_online"] = online

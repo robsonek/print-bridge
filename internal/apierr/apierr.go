@@ -16,6 +16,7 @@ const (
 	CodeInvalidRequest    Code = "INVALID_REQUEST"
 	CodeMissingToken      Code = "MISSING_TOKEN"
 	CodeForbidden         Code = "FORBIDDEN"
+	CodePrinterBusy       Code = "PRINTER_BUSY"
 )
 
 var retryable = map[Code]bool{
@@ -25,6 +26,7 @@ var retryable = map[Code]bool{
 	CodeQueuePaused:      true,
 	CodePrintTimeout:     true,
 	CodeBridgeRestarting: true,
+	CodePrinterBusy:      true, // druk w toku — spróbuj po jego zakończeniu
 }
 
 func (c Code) Retryable() bool { return retryable[c] }
