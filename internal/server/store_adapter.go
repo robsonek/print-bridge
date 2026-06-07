@@ -12,7 +12,9 @@ func (a *idemAdapter) Get(key string) (StoreRecord, bool, error) {
 	if err != nil || !found {
 		return StoreRecord{}, found, err
 	}
-	return StoreRecord{ResponseJSON: r.ResponseJSON, CUPSJobID: r.CUPSJobID, Terminal: r.Terminal}, true, nil
+	return StoreRecord{ResponseJSON: r.ResponseJSON, CUPSJobID: r.CUPSJobID, Terminal: r.Terminal, Fault: r.Fault}, true, nil
 }
-func (a *idemAdapter) SavePending(key, job string) error   { return a.s.SavePending(key, job) }
+func (a *idemAdapter) SavePending(key, job, fault string) error {
+	return a.s.SavePending(key, job, fault)
+}
 func (a *idemAdapter) SaveTerminal(key, body string) error { return a.s.SaveTerminal(key, body) }

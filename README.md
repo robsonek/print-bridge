@@ -10,6 +10,10 @@ backendem `lpdpaced`, potwierdza FIZYCZNE zakończenie druku przez ZPL `~HS`.
   `{label_base64|pdf_base64, copies, format?, external_reference?}`.
   `status:"printed"` = ostatnia etykieta fizycznie wyszła (drain-poll `~HS`);
   retry z tym samym kluczem wznawia istniejący job (zero duplikatów).
+  **Wyjątek:** po faulcie sprzętowym (np. brak papieru) fizyczny wynik joba
+  jest nieobserwowalny — retry zwraca `PRINT_UNCONFIRMED` (409, nie-retryable)
+  i wymaga decyzji człowieka: potwierdź albo dodrukuj NOWYM kluczem
+  (`docs/error-contract.md`).
 - `GET  /api/v1/health` — drukarka/CUPS/`~HS`: m.in. `head_open`, `paper_out`,
   `paused`, `queued_formats`, `batch_remaining`, `host_status`/`host_status_2`,
   `watchdog_auto_resets` (200 ok / 503 degraded).

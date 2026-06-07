@@ -1,6 +1,7 @@
 package idempotency
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -31,7 +32,7 @@ func TestMissingKey(t *testing.T) {
 
 func TestPendingThenTerminalReplay(t *testing.T) {
 	s := openTemp(t)
-	if err := s.SavePending("pj:1", "cups-7"); err != nil {
+	if err := s.SavePending("pj:1", "cups-7", ""); err != nil {
 		t.Fatal(err)
 	}
 	rec, found, _ := s.Get("pj:1")
@@ -51,7 +52,7 @@ func TestPendingThenTerminalReplay(t *testing.T) {
 // expired/corrupt — Get must report found=false, not return an un-expiring record.
 func TestGetUnparsableCreatedAtTreatedAsAbsent(t *testing.T) {
 	s := openTemp(t)
-	if err := s.SavePending("pj:bad", "cups-9"); err != nil {
+	if err := s.SavePending("pj:bad", "cups-9", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Corrupt the created_at to a non-RFC3339 value.
@@ -83,7 +84,7 @@ func TestConcurrentSavePendingNoLockError(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				key := fmt.Sprintf("pj:%d-%d", w, i)
-				if err := s.SavePending(key, fmt.Sprintf("cups-%d-%d", w, i)); err != nil {
+				if err := s.SavePending(key, fmt.Sprintf("cups-%d-%d", w, i), ""); err != nil {
 					errCh <- err
 					return
 				}
@@ -116,4 +117,69 @@ func TestCleanupRemovesExpired(t *testing.T) {
 	if _, found, _ := s.Get("fresh"); !found {
 		t.Error("fresh row must survive cleanup")
 	}
+}
+
+func TestFaultMarkerRoundtrip(t *testing.T) {
+	s := openTemp(t)
+	if err := s.SavePending("k-fault", "7", "PRINTER_OUT_OF_PAPER"); err != nil {
+		t.Fatal(err)
+	}
+	r, found, err := s.Get("k-fault")
+	if err != nil || !found {
+		t.Fatalf("Get: %v found=%v", err, found)
+	}
+	if r.Fault != "PRINTER_OUT_OF_PAPER" || r.CUPSJobID != "7" {
+		t.Errorf("rekord = %+v", r)
+	}
+	// Upsert nadpisuje fault (np. eskalacja "" -> fault przy resume).
+	if err := s.SavePending("k-fault", "7", ""); err != nil {
+		t.Fatal(err)
+	}
+	r, _, _ = s.Get("k-fault")
+	if r.Fault != "" {
+		t.Errorf("fault po nadpisaniu = %q, want \"\"", r.Fault)
+	}
+}
+
+// Migracja: baza utworzona STARYM schematem (sprzed kolumny fault — taka leży
+// na produkcyjnej VM) musi się otworzyć i obsłużyć fault bez utraty danych.
+func TestOpenMigratesOldSchema(t *testing.T) {
+	path := t.TempDir() + "/old.db"
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE idempotency (
+			key          TEXT PRIMARY KEY,
+			response_json TEXT NOT NULL DEFAULT '',
+			cups_job_id  TEXT NOT NULL DEFAULT '',
+			terminal     INTEGER NOT NULL DEFAULT 0,
+			created_at   TEXT NOT NULL
+		);
+		INSERT INTO idempotency(key, cups_job_id, terminal, created_at)
+		VALUES('stary', '9', 0, '` + time.Now().UTC().Format(time.RFC3339) + `');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	s, err := Open(path, 30)
+	if err != nil {
+		t.Fatalf("Open na starym schemacie: %v", err)
+	}
+	defer s.Close()
+	r, found, err := s.Get("stary")
+	if err != nil || !found {
+		t.Fatalf("Get po migracji: %v found=%v", err, found)
+	}
+	if r.CUPSJobID != "9" || r.Fault != "" {
+		t.Errorf("rekord po migracji = %+v", r)
+	}
+	// Idempotencja migracji: ponowne Open nie może się wywalić.
+	s2, err := Open(path, 30)
+	if err != nil {
+		t.Fatalf("drugie Open: %v", err)
+	}
+	_ = s2.Close()
 }

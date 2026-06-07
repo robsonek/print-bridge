@@ -5,6 +5,7 @@ package idempotency
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -15,7 +16,11 @@ type Record struct {
 	ResponseJSON string
 	CUPSJobID    string
 	Terminal     bool
-	CreatedAt    time.Time
+	// Fault: kod apierr faultu sprzętowego zapisany przy pending ("" = brak).
+	// Resume-po-faulcie nie może zwrócić "printed" — fizyczny wynik jest
+	// nieobserwowalny (format bywa odrzucany przy recovery medium).
+	Fault     string
+	CreatedAt time.Time
 }
 
 type Store struct {
@@ -56,6 +61,12 @@ func Open(path string, ttlDays int) (*Store, error) {
 	`); err != nil {
 		return nil, err
 	}
+	// Migracja istniejących baz (kolumna dodana w v0.4.x): duplikat kolumny to
+	// jedyny oczekiwany błąd i oznacza "już zmigrowane".
+	if _, err := db.Exec(`ALTER TABLE idempotency ADD COLUMN fault TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return nil, err
+	}
 	return &Store{db: db, ttl: time.Duration(ttlDays) * 24 * time.Hour}, nil
 }
 
@@ -69,8 +80,8 @@ func (s *Store) Get(key string) (Record, bool, error) {
 		created string
 	)
 	err := s.db.QueryRow(
-		`SELECT key, response_json, cups_job_id, terminal, created_at FROM idempotency WHERE key = ?`, key,
-	).Scan(&r.Key, &r.ResponseJSON, &r.CUPSJobID, &term, &created)
+		`SELECT key, response_json, cups_job_id, terminal, fault, created_at FROM idempotency WHERE key = ?`, key,
+	).Scan(&r.Key, &r.ResponseJSON, &r.CUPSJobID, &term, &r.Fault, &created)
 	if err == sql.ErrNoRows {
 		return Record{}, false, nil
 	}
@@ -92,12 +103,12 @@ func (s *Store) Get(key string) (Record, bool, error) {
 	return r, true, nil
 }
 
-func (s *Store) SavePending(key, cupsJobID string) error {
+func (s *Store) SavePending(key, cupsJobID, fault string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO idempotency(key, cups_job_id, terminal, created_at)
-		VALUES(?, ?, 0, ?)
-		ON CONFLICT(key) DO UPDATE SET cups_job_id = excluded.cups_job_id`,
-		key, cupsJobID, time.Now().UTC().Format(time.RFC3339))
+		INSERT INTO idempotency(key, cups_job_id, terminal, fault, created_at)
+		VALUES(?, ?, 0, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET cups_job_id = excluded.cups_job_id, fault = excluded.fault`,
+		key, cupsJobID, fault, time.Now().UTC().Format(time.RFC3339))
 	return err
 }
 
