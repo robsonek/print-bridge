@@ -20,12 +20,14 @@ func TestLoadDefaultsWhenNoFile(t *testing.T) {
 }
 
 func TestRenderQualityDefaults(t *testing.T) {
-	// Calibrated on a real XP-423B (2026-06-06): render width below the 832-dot
-	// printhead to leave a margin, darker threshold + ^MD + slow ^PR against faint
-	// thermal print. See print-bridge/docs/hardware-spike-findings.md.
+	// Calibrated on a real XP-423B: render width below the 832-dot printhead for a
+	// margin; threshold 190 (carrier PDFs stroke some frame lines at luma 166/183,
+	// dropped at 160). Darkness knobs (^MD/~SD/panel density) proven inert on this
+	// firmware (2026-06-07); ^PR works, PR2 kept for a saturated, scannable barcode.
+	// See print-bridge/docs/hardware-spike-findings.md.
 	c := Default()
 	checks := map[string]struct{ got, want int }{
-		"RenderThreshold": {c.RenderThreshold, 160},
+		"RenderThreshold": {c.RenderThreshold, 190},
 		"LabelDarkness":   {c.LabelDarkness, 14},
 		"PrintSpeedIPS":   {c.PrintSpeedIPS, 2},
 		"MarginXDots":     {c.MarginXDots, 16},

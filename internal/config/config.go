@@ -47,7 +47,12 @@ func Default() Config {
 		LabelHeightMM: 152,
 		RenderDPI:     203,
 		// Calibrated on hardware: scannable barcode, visible margin, non-faint print.
-		RenderThreshold: 160,
+		// 190 (not 160): carrier PDFs stroke some frame lines at luma 166/183 —
+		// above 160 they vanished ("brakująca kreska ramki", orlen 2026-06-07).
+		// 190 keeps them; the small-text bolding it costs reads better at 203dpi
+		// than the thin 160 glyphs. Darkness knobs are inert on this firmware,
+		// so threshold is the only sharpness lever (docs/hardware-spike-findings).
+		RenderThreshold: 190,
 		LabelDarkness:   14,
 		PrintSpeedIPS:   2,
 		MarginXDots:     16,

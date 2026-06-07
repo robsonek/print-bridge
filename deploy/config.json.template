@@ -12,7 +12,7 @@
   "label_height_mm": 152,
   "render_dpi": 203,
 
-  "render_threshold": 160,
+  "render_threshold": 190,
   "label_darkness": 14,
   "print_speed_ips": 2,
   "margin_x_dots": 16,

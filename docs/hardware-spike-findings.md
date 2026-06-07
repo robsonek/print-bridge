@@ -292,8 +292,10 @@ przewoźników rysują CZĘŚĆ segmentów ramek jaśniejszą szarością niż r
 segmenty pod „KKP1" ~11 mm i „Gabaryt Allegro" ~22 mm; dhl ~165, inpost ~183).
 To kolor wektora (stały przy 800 i 2400 px) — **NIE antyaliasing, NIE kompresja
 RLE** (bezstratna; dekodowany raster bit-identyczny). Twardy próg 160 wpadał
-między 127 a 166, gubiąc jaśniejsze kreski. **Fix: `render_threshold: 190`**
-w `config.json` na VM (odzyskuje 166/183; koszt: drobny tekst minimalnie grubszy
-— akceptowalny, bo chudszy ze 160 jest mniej czytelny na termice 203 dpi). UWAGA:
-default w kodzie (`config.go`) to nadal **160** — VM ma override. Diagnozę
-zniknięć zaczynać od porównania renderu z progiem, nie od podejrzeń o enkoder/druk.
+między 127 a 166, gubiąc jaśniejsze kreski. **Fix: `render_threshold` → 190**
+(odzyskuje 166/183; koszt: drobny tekst minimalnie grubszy — akceptowalny, bo
+chudszy ze 160 jest mniej czytelny na termice 203 dpi). Domyślne **190** ustawione
+w OBU miejscach, żeby świeża instalacja Debiana nie regresowała: `config.go`
+`Default()` ORAZ `deploy/config.json.template` (szablon jest nadrzędny — jawnie
+seeduje `config.json`). Diagnozę zniknięć zaczynać od porównania renderu
+`pdftoppm -scale-to-x 800` z progiem, nie od podejrzeń o enkoder/druk.

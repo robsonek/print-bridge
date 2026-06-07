@@ -37,7 +37,8 @@ backendem `lpdpaced`, potwierdza FIZYCZNE zakończenie druku przez ZPL `~HS`.
   MARTWE na tym firmware; działa za to `^PR` (prędkość → ciepło na punkt):
   produkcyjnie `^PR2` dla pełnego krycia kodów kreskowych. Część ramek w PDF-ach
   przewoźników jest rysowana jaśniejszą szarością (luma 166/183) — `render_threshold`
-  na VM ustawiony na **190** (default w kodzie 160), żeby się drukowały.
+  domyślnie **190** (kod + `config.json.template`), żeby się drukowały; niżej
+  (np. 160) gubi te kreski.
 
 Pełne wyniki pomiarów: `docs/hardware-spike-findings.md`.
 
