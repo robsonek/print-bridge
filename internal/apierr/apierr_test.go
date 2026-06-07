@@ -12,7 +12,7 @@ func TestRetryableClassification(t *testing.T) {
 			t.Errorf("%s should be retryable", c)
 		}
 	}
-	noRetry := []Code{CodeInvalidPDF, CodeInvalidZPL, CodeUnsupportedFormat, CodeInvalidRequest, CodeMissingToken, CodeForbidden}
+	noRetry := []Code{CodeInvalidPDF, CodeInvalidZPL, CodeUnsupportedFormat, CodeInvalidRequest, CodeMissingToken, CodeForbidden, CodePrintUnconfirmed}
 	for _, c := range noRetry {
 		if c.Retryable() {
 			t.Errorf("%s should NOT be retryable", c)

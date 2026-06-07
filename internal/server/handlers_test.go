@@ -52,15 +52,20 @@ func (f *fakePrinter) ResumeJob(ctx context.Context, _ int) (printer.Result, *ap
 	return f.res, f.err
 }
 
+type pendingRec struct {
+	job   string
+	fault string
+}
+
 type memStore struct {
 	mu       sync.Mutex
 	terminal map[string]string
-	pending  map[string]string
+	pending  map[string]pendingRec
 	getErr   error // when set, Get returns this error
 }
 
 func newMemStore() *memStore {
-	return &memStore{terminal: map[string]string{}, pending: map[string]string{}}
+	return &memStore{terminal: map[string]string{}, pending: map[string]pendingRec{}}
 }
 func (m *memStore) Get(k string) (StoreRecord, bool, error) {
 	m.mu.Lock()
@@ -71,15 +76,15 @@ func (m *memStore) Get(k string) (StoreRecord, bool, error) {
 	if r, ok := m.terminal[k]; ok {
 		return StoreRecord{ResponseJSON: r, Terminal: true}, true, nil
 	}
-	if j, ok := m.pending[k]; ok {
-		return StoreRecord{CUPSJobID: j, Terminal: false}, true, nil
+	if r, ok := m.pending[k]; ok {
+		return StoreRecord{CUPSJobID: r.job, Fault: r.fault, Terminal: false}, true, nil
 	}
 	return StoreRecord{}, false, nil
 }
-func (m *memStore) SavePending(k, job string) error {
+func (m *memStore) SavePending(k, job, fault string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pending[k] = job
+	m.pending[k] = pendingRec{job: job, fault: fault}
 	return nil
 }
 func (m *memStore) SaveTerminal(k, body string) error {
@@ -92,7 +97,7 @@ func (m *memStore) getPending(k string) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	v, ok := m.pending[k]
-	return v, ok
+	return v.job, ok
 }
 
 func newHandlers(p PrintService, s Store) *Handlers {
@@ -226,7 +231,7 @@ func TestPrintJobGetErrorIsSafeRefusal(t *testing.T) {
 // (retryable) rather than resubmit.
 func TestPrintJobPendingUnparsableJobIDRefuses(t *testing.T) {
 	store := newMemStore()
-	store.pending["pj:corrupt"] = "not-a-number"
+	store.pending["pj:corrupt"] = pendingRec{job: "not-a-number"}
 	fp := &fakePrinter{res: printer.Result{Status: "printed", CUPSJobID: "7"}}
 	h := newHandlers(fp, store)
 	body := `{"label_base64":"XlhBREFUQV5YWg==","copies":1}`
@@ -246,7 +251,7 @@ func TestPrintJobPendingUnparsableJobIDRefuses(t *testing.T) {
 // Regression: a pending record with a valid cups_job_id resumes (no new Submit).
 func TestPrintJobPendingResumes(t *testing.T) {
 	store := newMemStore()
-	store.pending["pj:resume"] = "42"
+	store.pending["pj:resume"] = pendingRec{job: "42"}
 	fp := &fakePrinter{res: printer.Result{Status: "printed", CUPSJobID: "42"}}
 	h := newHandlers(fp, store)
 	body := `{"label_base64":"XlhBREFUQV5YWg==","copies":1}`
@@ -334,7 +339,7 @@ func TestPrintJobAppliesServerSideDeadline(t *testing.T) {
 // server-side deadline.
 func TestResumeJobAppliesServerSideDeadline(t *testing.T) {
 	store := newMemStore()
-	store.pending["pj:resumeddl"] = "42"
+	store.pending["pj:resumeddl"] = pendingRec{job: "42"}
 	fp := &fakePrinter{res: printer.Result{Status: "printed", CUPSJobID: "42"}}
 	h := newHandlers(fp, store)
 	body := `{"label_base64":"XlhBREFUQV5YWg==","copies":1}`
@@ -394,5 +399,86 @@ func TestAdminPrinterResetBusyPropagatesError(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "PRINTER_BUSY") {
 		t.Errorf("body %q bez PRINTER_BUSY", rec.Body.String())
+	}
+}
+
+// Dowód sprzętowy 2026-06-07: po OUT_OF_PAPER print-server ODRZUCIŁ
+// zbuforowany format przy załadowaniu medium, a resume zwracał fałszywe
+// "printed" (job CUPS completed + drukarka zdrowa). Po faulcie sprzętowym
+// retry MUSI zwrócić NIE-retryable PRINT_UNCONFIRMED i NIE wolno mu nawet
+// dotykać ResumeJob (zdrowy stan drukarki niczego tu nie dowodzi).
+func TestRetryAfterPaperFaultIsUnconfirmedNotPrinted(t *testing.T) {
+	fp := &fakePrinter{
+		res: printer.Result{CUPSJobID: "3"},
+		err: apierr.New(apierr.CodeOutOfPaper, "printer reports media-empty (~HS)", 503),
+	}
+	st := newMemStore()
+	h := newHandlers(fp, st)
+
+	body := `{"label_base64":"XlhBXlha"}` // ^XA^XZ
+	req1 := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req1.Header.Set("Idempotency-Key", "jam-1")
+	rec1 := httptest.NewRecorder()
+	h.PrintJobs(rec1, req1)
+	if rec1.Code != 503 || !strings.Contains(rec1.Body.String(), "PRINTER_OUT_OF_PAPER") {
+		t.Fatalf("pierwsza odpowiedź = %d %s, want 503 OUT_OF_PAPER", rec1.Code, rec1.Body.String())
+	}
+
+	// Retry: nawet gdyby drukarka była teraz zdrowa (fake zwróciłby printed),
+	// odpowiedź musi być PRINT_UNCONFIRMED bez wywołania ResumeJob.
+	fp.err = nil
+	fp.res = printer.Result{Status: "printed", CUPSJobID: "3"}
+	req2 := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req2.Header.Set("Idempotency-Key", "jam-1")
+	rec2 := httptest.NewRecorder()
+	h.PrintJobs(rec2, req2)
+
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("retry po faulcie = %d %s, want 409", rec2.Code, rec2.Body.String())
+	}
+	for _, want := range []string{"PRINT_UNCONFIRMED", `"original_fault":"PRINTER_OUT_OF_PAPER"`, `"cups_job_id":"3"`} {
+		if !strings.Contains(rec2.Body.String(), want) {
+			t.Errorf("body %q bez %q", rec2.Body.String(), want)
+		}
+	}
+	if fp.resumeCalls.Load() != 0 {
+		t.Errorf("ResumeJob wywołany %d razy — po faulcie nie wolno (fałszywe printed)", fp.resumeCalls.Load())
+	}
+	if fp.submitCalls.Load() != 1 {
+		t.Errorf("Print wywołany %d razy — retry nie może resubmitować (duplikat)", fp.submitCalls.Load())
+	}
+}
+
+// PRINT_TIMEOUT to NIE fault sprzętowy (etykieta drukuje się dalej) — pending
+// bez znacznika, resume działa jak dotąd i może uczciwie potwierdzić printed.
+func TestRetryAfterTimeoutStillResumesNormally(t *testing.T) {
+	fp := &fakePrinter{
+		res: printer.Result{CUPSJobID: "4"},
+		err: apierr.New(apierr.CodePrintTimeout, "still draining", 503),
+	}
+	st := newMemStore()
+	h := newHandlers(fp, st)
+
+	body := `{"label_base64":"XlhBXlha"}`
+	req1 := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req1.Header.Set("Idempotency-Key", "slow-1")
+	rec1 := httptest.NewRecorder()
+	h.PrintJobs(rec1, req1)
+	if rec1.Code != 503 {
+		t.Fatalf("pierwsza odpowiedź = %d, want 503", rec1.Code)
+	}
+
+	fp.err = nil
+	fp.res = printer.Result{Status: "printed", CUPSJobID: "4"}
+	req2 := httptest.NewRequest("POST", "/api/v1/print-jobs", strings.NewReader(body))
+	req2.Header.Set("Idempotency-Key", "slow-1")
+	rec2 := httptest.NewRecorder()
+	h.PrintJobs(rec2, req2)
+
+	if rec2.Code != http.StatusOK || !strings.Contains(rec2.Body.String(), `"printed"`) {
+		t.Fatalf("retry po timeout = %d %s, want 200 printed", rec2.Code, rec2.Body.String())
+	}
+	if fp.resumeCalls.Load() != 1 {
+		t.Errorf("ResumeJob = %d wywołań, want 1 (normalny resume)", fp.resumeCalls.Load())
 	}
 }

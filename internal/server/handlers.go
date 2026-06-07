@@ -18,11 +18,12 @@ type StoreRecord struct {
 	ResponseJSON string
 	CUPSJobID    string
 	Terminal     bool
+	Fault        string // kod apierr faultu sprzętowego przy pending ("" = brak)
 }
 
 type Store interface {
 	Get(key string) (StoreRecord, bool, error)
-	SavePending(key, cupsJobID string) error
+	SavePending(key, cupsJobID, fault string) error
 	SaveTerminal(key, responseJSON string) error
 }
 
@@ -107,6 +108,21 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(rec.ResponseJSON))
 			return
 		}
+		// Resume-po-faulcie sprzętowym: fizyczny wynik joba jest
+		// NIEOBSERWOWALNY (dowód na sprzęcie 2026-06-07: po paper-out
+		// print-server ODRZUCIŁ zbuforowany format przy załadowaniu medium —
+		// flaga batcha 1->0 bez druku; w innych gałęziach recovery ten sam
+		// sygnał oznacza wydrukowanie). Zwykły resume zwróciłby fałszywe
+		// "printed" (zdrowa, niedrenująca drukarka). Jedyną wyrocznią jest
+		// człowiek: zwróć NIE-retryable PRINT_UNCONFIRMED — UI każe
+		// potwierdzić wydruk albo dodrukować NOWYM kluczem.
+		if rec.Fault != "" {
+			writeError(w, apierr.New(apierr.CodePrintUnconfirmed,
+				"job przerwany faultem sprzętowym — fizyczny wynik niepotwierdzalny; potwierdź wydruk albo dodrukuj nowym Idempotency-Key", http.StatusConflict).
+				WithDetail("original_fault", rec.Fault).
+				WithDetail("cups_job_id", rec.CUPSJobID))
+			return
+		}
 		// Pending: a job was already submitted to CUPS for this key. Resume it
 		// instead of resubmitting. If the stored job id is missing/unparsable
 		// (corruption — unreachable in normal flow), refuse with a retryable
@@ -120,7 +136,7 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := h.printContext(r) // #27: bound the resume/poll budget
 		defer cancel()
 		res, perr := h.Printer.ResumeJob(ctx, jobID)
-		h.persistPending(key, res)
+		h.persistPending(key, res, perr)
 		h.finish(w, key, res, perr)
 		return
 	}
@@ -160,16 +176,22 @@ func (h *Handlers) PrintJobs(w http.ResponseWriter, r *http.Request) {
 	// inside Print() and this SavePending. It cannot be closed without a pre-submit
 	// marker (a much larger change); this fix already eliminates the 30s polling
 	// window and the concurrency window, which were the dominant duplicate vectors.
-	h.persistPending(key, res)
+	h.persistPending(key, res, perr)
 	h.finish(w, key, res, perr)
 }
 
-// persistPending records the CUPS job id for resume-by-key when present.
-func (h *Handlers) persistPending(key string, res printer.Result) {
+// persistPending records the CUPS job id for resume-by-key when present. A
+// hardware fault that interrupts the job (proven: OUT_OF_PAPER) poisons the
+// record — resume must not claim "printed" for it (see the rec.Fault branch).
+func (h *Handlers) persistPending(key string, res printer.Result, perr *apierr.Error) {
 	if res.CUPSJobID == "" {
 		return
 	}
-	if err := h.Store.SavePending(key, res.CUPSJobID); err != nil {
+	fault := ""
+	if perr != nil && perr.Code == apierr.CodeOutOfPaper {
+		fault = string(perr.Code)
+	}
+	if err := h.Store.SavePending(key, res.CUPSJobID, fault); err != nil {
 		log.Printf("idempotency SavePending key=%q job=%q failed: %v", key, res.CUPSJobID, err)
 	}
 }

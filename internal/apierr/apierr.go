@@ -17,6 +17,12 @@ const (
 	CodeMissingToken      Code = "MISSING_TOKEN"
 	CodeForbidden         Code = "FORBIDDEN"
 	CodePrinterBusy       Code = "PRINTER_BUSY"
+	// CodePrintUnconfirmed: job po faulcie sprzętowym — fizyczny wynik
+	// NIEOBSERWOWALNY (format mógł zostać odrzucony LUB wydrukowany przy
+	// recovery; dowód: hardware-spike-findings.md, test paper-out 2026-06-07).
+	// Wymaga decyzji człowieka (potwierdź/dodrukuj NOWYM kluczem) — celowo
+	// NIE-retryable, żeby automat nie pętlił i nie wymuszał fałszywego printed.
+	CodePrintUnconfirmed Code = "PRINT_UNCONFIRMED"
 )
 
 var retryable = map[Code]bool{
