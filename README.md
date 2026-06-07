@@ -33,6 +33,11 @@ backendem `lpdpaced`, potwierdza FIZYCZNE zakończenie druku przez ZPL `~HS`.
   stąd guard wiarygodności `<10000`.
 - Watchdog (tick 60 s) auto-resetuje zawieszony responder `~HS` (3 kolejne
   erry transportu + TCP żywe + panel `Ready`; rate-limit 15 min).
+- Gałki ciemności (`^MD`, `~SD`, panelowa density — także po power-cycle) są
+  MARTWE na tym firmware; działa za to `^PR` (prędkość → ciepło na punkt):
+  produkcyjnie `^PR2` dla pełnego krycia kodów kreskowych. Część ramek w PDF-ach
+  przewoźników jest rysowana jaśniejszą szarością (luma 166/183) — `render_threshold`
+  na VM ustawiony na **190** (default w kodzie 160), żeby się drukowały.
 
 Pełne wyniki pomiarów: `docs/hardware-spike-findings.md`.
 

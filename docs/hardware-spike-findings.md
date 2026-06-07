@@ -268,3 +268,32 @@ pierwszy ruch: obniżyć `rate=` w device-uri (silnik konsumuje ~6.6 KB/s).
 **Konsekwencja:** skalowanie `confirm_timeout` liczbą etykiet (labelCount) zostaje jako
 bezpiecznik, ale przestało być workaroundem — completed przychodzi po transferze (~3 s),
 nie po fizycznym druku.
+
+## Ciemność/prędkość/szare ramki — pomiary 2026-06-07 (sesja ostrości)
+
+**Gałki ciemności WSZYSTKIE martwe, prędkość `^PR` DZIAŁA.** Eksperyment: 1 etykieta
+orlen drukowana wielokrotnie. `^MD8/11/14`, `~SD03` (absolutne, ~minimum) oraz
+panelowa **Density 14→10→2** (form POST `/admin/cgi-bin/general.cgi` na :80; pola:
+speed, density, direction, code_page, country, removal, cut_piece, cut_back, mirror,
+head, reprint — POST wymaga KOMPLETU), w tym density 2 od **power-cycle** — wydruki
+**nieodróżnialne**. Firmware (CEZD) ignoruje ^MD/~SD; panelowa density nie wpływa
+na ścieżkę ZPL `^GFA`. **`^PR` natomiast działa**: pasek PR2/3/4/5 rozróżnialny na
+żywo, PR6 wyraźnie szybszy wysuw. Szybciej = mniej ciepła na punkt = bledszy druk.
+Z pary kalibracyjnej „`^MD14`+`^PR2` przeciw bladości" (pkt 6b) realna była tylko
+połowa: wolne **PR2 = maksimum ciepła** (nasycony, skanowalny kod kreskowy);
+`^MD14` było placebo (panel miał density 14 w NVRAM — korelacja, nie przyczyna).
+**Decyzja (z userem): zostaje PR2** — szybsze PR bledną kod kreskowy, a jego
+krycie jest najważniejsze. `^MD`/`^PR` zostają w `WrapLabel` (nieszkodliwe,
+działałyby na oryginalnym Zebra).
+
+**Szare ramki znikające przy progu 160 — fix: `render_threshold` 190.** PDF-y
+przewoźników rysują CZĘŚĆ segmentów ramek jaśniejszą szarością niż resztę
+(zmierzone renderem `pdftoppm -scale-to-x 800`: orlen luma **166** vs 127 —
+segmenty pod „KKP1" ~11 mm i „Gabaryt Allegro" ~22 mm; dhl ~165, inpost ~183).
+To kolor wektora (stały przy 800 i 2400 px) — **NIE antyaliasing, NIE kompresja
+RLE** (bezstratna; dekodowany raster bit-identyczny). Twardy próg 160 wpadał
+między 127 a 166, gubiąc jaśniejsze kreski. **Fix: `render_threshold: 190`**
+w `config.json` na VM (odzyskuje 166/183; koszt: drobny tekst minimalnie grubszy
+— akceptowalny, bo chudszy ze 160 jest mniej czytelny na termice 203 dpi). UWAGA:
+default w kodzie (`config.go`) to nadal **160** — VM ma override. Diagnozę
+zniknięć zaczynać od porównania renderu z progiem, nie od podejrzeń o enkoder/druk.
