@@ -211,6 +211,23 @@ tym klonie → prawdziwy sygnał to `status.cgi` Printing→Ready (punkt 1 backl
 - [ ] **VM: agent NIE jest zainstalowany w `/opt`** (spike uruchamiał binarkę ręcznie jako robson) —
       docelowo `install-debian.sh` (instaluje też backend `lpdpaced` i przepina kolejkę).
 
+## Fault papieru — NIEOBSERWOWALNOŚĆ wyniku (2026-06-07, test flow merchanta)
+
+**Korekta #13:** „Paper Empty" (brak medium NA STARCIE joba) ≠ „Paper Jam" (zacięcie
+mid-print). Paper Empty **auto-clears** po załadowaniu rolki (panel wraca do Ready bez
+resetu) — latched bywa dopiero JAM. Przy okazji: panel pokazał NOWY string `Paper Empty`,
+którego spike nie znał — reguła „każdy redtext = fault" obroniła się w praktyce.
+
+**Kluczowe odkrycie:** przy załadowaniu medium po Paper Empty print-server **ODRZUCA
+zbuforowany format** (flaga batcha linia2[8]: 1→0, wyjeżdża pusta kalibracyjna, treść
+przepada). W innych gałęziach recovery (func=reset — spike #14; wznowienie mid-batch)
+ten sam sygnał 1→0 oznacza WYDRUKOWANIE. Fizyczny wynik joba po faulcie jest więc
+**nieobserwowalny** — każda automatyczna decyzja (resume→printed / auto-dodruk) jest
+błędna w którejś gałęzi. Zmierzone: retry po faulcie zwracał fałszywe `printed` w 65 ms.
+**Kontrakt (v0.4.1):** fault znacznikowany w idempotency; retry → `PRINT_UNCONFIRMED`
+(409, nie-retryable) → decyzja człowieka (docs/error-contract.md). Zwalidowane E2E na
+sprzęcie: retry=409 z details, dodruk nowym kluczem=1 etykieta.
+
 ## Multi-label delay — ROZWIĄZANE (2026-06-06, sesja wieczorna)
 
 **Objaw:** 2-etykietowy DPD PDF: 1. etykieta od razu, 2. po ~60 s, agent → `PRINT_TIMEOUT`.
