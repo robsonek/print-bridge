@@ -8,7 +8,7 @@ ALLOW_CIDR="${3:?egress CIDR of the orchestrator required}"
 INSTALL_DIR=/opt/print-bridge
 
 apt-get update
-apt-get install -y cups cups-client poppler-utils ufw
+apt-get install -y cups cups-client poppler-utils ufw openssl
 
 # Paced LPD backend: the XP-423B print-server (10/100, Ethernut) drops segments
 # when a GbE sender bursts >40-60 KB/s; Linux then backs off retransmissions and
@@ -31,7 +31,24 @@ mkdir -p "$INSTALL_DIR/data"
 
 install -m 0755 ./print-bridge "$INSTALL_DIR/print-bridge"
 install -m 0644 ./print-bridge.service /etc/systemd/system/print-bridge.service
-[ -f "$INSTALL_DIR/config.json" ] || install -m 0600 ./config.json.template "$INSTALL_DIR/config.json"
+
+# Seed config.json on a FRESH install (an existing one is preserved untouched on
+# re-install / update). The installer already knows the printer IP and queue, so
+# write them in — and generate the auth token — leaving a box that needs no
+# hand-editing. CRITICAL: printer_ip is the agent's OWN source of truth for the
+# reachability pre-check and ~HS confirm; if it stays at the template placeholder
+# the agent rejects every print with 503 even though the CUPS queue URI is right.
+CONFIG="$INSTALL_DIR/config.json"
+GEN_TOKEN=""
+if [ ! -f "$CONFIG" ]; then
+  install -m 0600 ./config.json.template "$CONFIG"
+  GEN_TOKEN="$(openssl rand -hex 32)"
+  sed -i \
+    -e "s#\"printer_ip\": \"10.0.0.50\"#\"printer_ip\": \"${PRINTER_IP}\"#" \
+    -e "s#\"cups_queue\": \"xp423b\"#\"cups_queue\": \"${QUEUE}\"#" \
+    -e "s#REPLACE_WITH_64_CHAR_TOKEN#${GEN_TOKEN}#" \
+    "$CONFIG"
+fi
 chown -R print-bridge:print-bridge "$INSTALL_DIR"
 
 # Self-update: the updater is ROOT-OWNED and OUTSIDE /opt (which is chowned to
@@ -55,4 +72,9 @@ ufw allow from "$ALLOW_CIDR" to any port 9443 proto tcp
 
 systemctl daemon-reload
 systemctl enable --now print-bridge
-echo "Installed. Edit $INSTALL_DIR/config.json (token!) then: systemctl restart print-bridge"
+if [ -n "$GEN_TOKEN" ]; then
+  echo "Installed. config.json seeded (printer_ip=$PRINTER_IP, cups_queue=$QUEUE) — no edit needed."
+  echo "print_token (hand this to the orchestrator): $GEN_TOKEN"
+else
+  echo "Installed. Existing $CONFIG kept unchanged; restart after any edits: systemctl restart print-bridge"
+fi

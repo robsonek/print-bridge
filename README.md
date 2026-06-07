@@ -49,9 +49,11 @@ Pełne wyniki pomiarów: `docs/hardware-spike-findings.md`.
 `sudo ./install-debian.sh <printer_ip> <queue> <egress_cidr>` — instaluje
 agenta (`/opt/print-bridge`, systemd), backend CUPS
 (`/usr/lib/cups/backend/lpdpaced`), updater (`/usr/local/sbin/update-bridge.sh`
-+ sudoers drop-in dla self-update) i kolejkę `lpdpaced://`. Po instalacji
-ustaw `print_token` w `config.json` i zrestartuj; przed produkcją
-`ufw allow ssh && ufw enable`. Aktualizacja ręczna:
++ sudoers drop-in dla self-update) i kolejkę `lpdpaced://`. Przy świeżej
+instalacji `config.json` jest seedowany automatycznie: `printer_ip` i
+`cups_queue` z argumentów + wygenerowany `print_token` (wypisany na końcu —
+przekaż go orchestratorowi); ponowna instalacja NIE rusza istniejącego
+configu. Przed produkcją `ufw allow ssh && ufw enable`. Aktualizacja ręczna:
 `sudo update-bridge.sh <tag>`. Patrz `deploy/`.
 
 ## Wymagania runtime
