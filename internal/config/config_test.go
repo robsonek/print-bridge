@@ -20,20 +20,21 @@ func TestLoadDefaultsWhenNoFile(t *testing.T) {
 }
 
 func TestRenderQualityDefaults(t *testing.T) {
-	// Calibrated on a real XP-423B: render width below the 832-dot printhead for a
-	// margin; threshold 190 (carrier PDFs stroke some frame lines at luma 166/183,
-	// dropped at 160). Darkness knobs (^MD/~SD/panel density) proven inert on this
-	// firmware (2026-06-07); ^PR works, PR2 kept for a saturated, scannable barcode.
-	// See print-bridge/docs/hardware-spike-findings.md.
+	// Calibrated on a real XP-423B: render to the full 832-dot printhead (margin_x 0)
+	// — fit-to-width below the head under-scaled carrier A6 PDFs ~5%, leaving ~1cm
+	// blank at the label bottom (dpd_ad, 2026-06-07); threshold 190 (carrier PDFs
+	// stroke some frame lines at luma 166/183, dropped at 160). Darkness knobs
+	// (^MD/~SD/panel density) proven inert on this firmware (2026-06-07); ^PR works,
+	// PR2 kept for a saturated, scannable barcode. See docs/hardware-spike-findings.md.
 	c := Default()
 	checks := map[string]struct{ got, want int }{
 		"RenderThreshold": {c.RenderThreshold, 190},
 		"LabelDarkness":   {c.LabelDarkness, 14},
 		"PrintSpeedIPS":   {c.PrintSpeedIPS, 2},
-		"MarginXDots":     {c.MarginXDots, 16},
+		"MarginXDots":     {c.MarginXDots, 0},
 		"MarginYDots":     {c.MarginYDots, 8},
 		"PrintWidthDots":  {c.PrintWidthDots, 832},
-		"RenderWidthDots": {c.RenderWidthDots, 800},
+		"RenderWidthDots": {c.RenderWidthDots, 832},
 	}
 	for name, ck := range checks {
 		if ck.got != ck.want {
@@ -54,7 +55,7 @@ func TestRenderQualityFromFile(t *testing.T) {
 		t.Errorf("file overrides not applied: MD=%d PR=%d thresh=%d", c.LabelDarkness, c.PrintSpeedIPS, c.RenderThreshold)
 	}
 	// Unspecified render fields keep defaults.
-	if c.PrintWidthDots != 832 || c.RenderWidthDots != 800 {
+	if c.PrintWidthDots != 832 || c.RenderWidthDots != 832 {
 		t.Errorf("unspecified render fields lost defaults: PW=%d RW=%d", c.PrintWidthDots, c.RenderWidthDots)
 	}
 }

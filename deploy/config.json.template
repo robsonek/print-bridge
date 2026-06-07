@@ -15,8 +15,8 @@
   "render_threshold": 190,
   "label_darkness": 14,
   "print_speed_ips": 2,
-  "margin_x_dots": 16,
+  "margin_x_dots": 0,
   "margin_y_dots": 8,
   "print_width_dots": 832,
-  "render_width_dots": 800
+  "render_width_dots": 832
 }

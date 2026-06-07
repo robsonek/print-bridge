@@ -30,7 +30,7 @@ type Config struct {
 	MarginXDots     int `json:"margin_x_dots"`     // ^FO left margin
 	MarginYDots     int `json:"margin_y_dots"`     // ^FO top margin (and symmetric bottom in ^LL)
 	PrintWidthDots  int `json:"print_width_dots"`  // ^PW printhead width (832 for a 4" head)
-	RenderWidthDots int `json:"render_width_dots"` // pdftoppm -scale-to-x; keep < PrintWidthDots for margin
+	RenderWidthDots int `json:"render_width_dots"` // pdftoppm -scale-to-x target width (dots)
 }
 
 func Default() Config {
@@ -55,10 +55,17 @@ func Default() Config {
 		RenderThreshold: 190,
 		LabelDarkness:   14,
 		PrintSpeedIPS:   2,
-		MarginXDots:     16,
+		MarginXDots:     0,
 		MarginYDots:     8,
 		PrintWidthDots:  832,
-		RenderWidthDots: 800,
+		// Fill the full 832-dot printhead (104mm). Carrier A6 PDFs (105x148mm) are
+		// proportionally wider than the 102x152mm label, so fit-to-width (-scale-to-x)
+		// caps height: rendering below the head (was 800=100mm) under-scaled the page
+		// ~5% and left ~1cm blank at the label bottom (dpd_ad, 2026-06-07). 832 reaches
+		// ~4mm from the bottom. Trade-off: content (104mm) runs ~2mm past the 102mm
+		// label, so the outermost frame line can land on the liner; 816 (=102mm exactly,
+		// margin_x 0) is the no-overflow fallback.
+		RenderWidthDots: 832,
 	}
 }
 
