@@ -16,4 +16,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - run: go vet ./...
       - run: go test ./...
-      - run: CGO_ENABLED=0 go build ./cmd/print-bridge
+      # Same ldflags shape as release.yml: a regression in the -X package path
+      # (e.g. after a rename) must surface here, not at release time.
+      - name: Build with version injection
+        run: |
+          VERSION="$(git describe --tags --always)"
+          CGO_ENABLED=0 go build -ldflags "-X github.com/robsonek/print-bridge/internal/version.Version=${VERSION}" ./cmd/print-bridge
