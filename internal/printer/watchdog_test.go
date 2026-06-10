@@ -106,6 +106,47 @@ func TestWatchdogNoResetWhilePrinting(t *testing.T) {
 	}
 }
 
+// Auto-reset trwa do ~30 s (MaxPolls x PollInterval). Tick nie może trzymać
+// przez ten czas mutexa współdzielonego ze Stats() — /health wisiałby przez
+// cały reset, czyli dokładnie wtedy, gdy monitoring najbardziej chce wiedzieć,
+// co się dzieje.
+func TestWatchdogStatsNotBlockedByInFlightReset(t *testing.T) {
+	hs := &fakeBackend{reachable: true, hsErr: errors.New("timeout")}
+	started := make(chan struct{})
+	block := make(chan struct{})
+	w := &Watchdog{
+		Probe: hs, Reach: hs, Panel: &fakePanel{states: []PanelState{ready}},
+		ResetFn: func(ctx context.Context) (ResetOutcome, error) {
+			close(started)
+			<-block // reset "w toku"
+			return ResetOutcome{PanelAfter: "Ready", HSOk: true}, nil
+		},
+		FailThreshold: 1, MinGap: 15 * time.Minute,
+	}
+
+	tickDone := make(chan struct{})
+	go func() {
+		w.Tick(context.Background())
+		close(tickDone)
+	}()
+	<-started
+
+	statsDone := make(chan WatchdogStats, 1)
+	go func() { statsDone <- w.Stats() }()
+	select {
+	case <-statsDone:
+		// Stats wróciło mimo wiszącego resetu — o to chodzi.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stats() zablokowane przez trwający auto-reset (mutex trzymany przez I/O)")
+	}
+
+	close(block)
+	<-tickDone
+	if st := w.Stats(); st.AutoResets != 1 {
+		t.Errorf("po dokończonym resecie AutoResets = %d, want 1", st.AutoResets)
+	}
+}
+
 func TestWatchdogRateLimitsResets(t *testing.T) {
 	hs := &fakeBackend{reachable: true, hsErr: errors.New("timeout")} // martwe na zawsze
 	rf := &fakeResetFn{}

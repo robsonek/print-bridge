@@ -64,22 +64,29 @@ func (w *Watchdog) Run(ctx context.Context) {
 }
 
 // Tick performs one watchdog evaluation (exported for tests).
+//
+// mu guards ONLY the counters. The I/O below it — Reachable, Panel.Status and
+// especially ResetFn (up to MaxPolls x PollInterval ≈ 30 s) — runs unlocked,
+// so Stats() (the /health endpoint) never hangs behind an in-flight reset.
+// Run drives Tick from a single goroutine, so unlocked I/O cannot interleave
+// two resets.
 func (w *Watchdog) Tick(ctx context.Context) {
 	_, _, err := w.Probe.HostStatus(ctx)
-	w.mu.Lock()
-	defer w.mu.Unlock()
 
+	w.mu.Lock()
 	if err == nil {
 		w.consecFails = 0 // odpowiedź (nawet niesparsowalna) = responder żyje
+		w.mu.Unlock()
 		return
 	}
 	w.consecFails++
-	if w.consecFails < w.FailThreshold {
+	fails := w.consecFails
+	if fails < w.FailThreshold || time.Since(w.lastReset) < w.MinGap {
+		w.mu.Unlock()
 		return
 	}
-	if time.Since(w.lastReset) < w.MinGap {
-		return
-	}
+	w.mu.Unlock()
+
 	// Sygnatura zawieszenia: ~HS martwe, ale TCP wstaje.
 	if ok, _ := w.Reach.Reachable(ctx); !ok {
 		return // drukarka wyłączona/odpięta — reset nic nie da
@@ -89,15 +96,21 @@ func (w *Watchdog) Tick(ctx context.Context) {
 		return // panel martwy / Printing / fault — nie ruszaj automatem
 	}
 
-	log.Printf("watchdog: ~HS martwe od %d sond, panel Ready — auto-reset print-servera", w.consecFails)
+	log.Printf("watchdog: ~HS martwe od %d sond, panel Ready — auto-reset print-servera", fails)
 	out, rerr := w.ResetFn(ctx)
+
+	w.mu.Lock()
 	w.lastReset = time.Now()
 	w.consecFails = 0
+	if rerr == nil {
+		w.autoResets++
+	}
+	w.mu.Unlock()
+
 	if rerr != nil {
 		log.Printf("watchdog: auto-reset nieudany: %v", rerr)
 		return
 	}
-	w.autoResets++
 	log.Printf("watchdog: auto-reset OK (panel=%s hs_ok=%v)", out.PanelAfter, out.HSOk)
 }
 
