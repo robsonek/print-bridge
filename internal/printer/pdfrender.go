@@ -38,7 +38,22 @@ func NewPDFRenderer(opt RenderOptions) *PDFRenderer {
 	return &PDFRenderer{opt: opt}
 }
 
-var pageSizeRE = regexp.MustCompile(`Page size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts`)
+// Matches both per-page lines ("Page    2 size:  595.28 x 841.89 pts", emitted
+// with -f/-l) and the single-page form ("Page size: ..." without them).
+var pageSizeRE = regexp.MustCompile(`Page(?:\s+\d+)?\s+size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts`)
+
+// pageWidthsPt extracts every page width (in points) from pdfinfo output.
+func pageWidthsPt(info []byte) []float64 {
+	var widths []float64
+	for _, m := range pageSizeRE.FindAllSubmatch(info, -1) {
+		w, err := strconv.ParseFloat(string(m[1]), 64)
+		if err != nil {
+			continue
+		}
+		widths = append(widths, w)
+	}
+	return widths
+}
 
 func (r *PDFRenderer) PDFToZPL(ctx context.Context, pdf []byte) ([]byte, error) {
 	dir, err := os.MkdirTemp("", "pb-pdf-*")
@@ -58,18 +73,21 @@ func (r *PDFRenderer) PDFToZPL(ctx context.Context, pdf []byte) ([]byte, error) 
 	// Key on the real MediaBox via pdfinfo instead. Also doubles as the
 	// invalid-PDF gate (pdfinfo fails on garbage).
 	if r.opt.WidthMM > 0 {
-		info, err := exec.CommandContext(ctx, "pdfinfo", in).CombinedOutput()
+		// -f 1 -l -1: per-page "Page N size:" lines. The default output reports
+		// only page 1, which let an "A6 cover + A4 body" PDF slip past the guard.
+		info, err := exec.CommandContext(ctx, "pdfinfo", "-f", "1", "-l", "-1", in).CombinedOutput()
 		if err != nil {
 			return nil, fmt.Errorf("pdfinfo failed (invalid PDF?): %v: %s", err, info)
 		}
-		m := pageSizeRE.FindSubmatch(info)
-		if m == nil {
+		widths := pageWidthsPt(info)
+		if len(widths) == 0 {
 			return nil, fmt.Errorf("pdfinfo: no Page size (invalid PDF?)")
 		}
-		wpt, _ := strconv.ParseFloat(string(m[1]), 64)
-		wmm := wpt / 72.0 * 25.4
-		if wmm > 1.4*float64(r.opt.WidthMM) {
-			return nil, fmt.Errorf("PDF page is %.0fmm wide, far exceeding the %dmm roll — MediaBox likely A4 not A6 (allegro-api#10120)", wmm, r.opt.WidthMM)
+		for i, wpt := range widths {
+			wmm := wpt / 72.0 * 25.4
+			if wmm > 1.4*float64(r.opt.WidthMM) {
+				return nil, fmt.Errorf("PDF page %d is %.0fmm wide, far exceeding the %dmm roll — MediaBox likely A4 not A6 (allegro-api#10120)", i+1, wmm, r.opt.WidthMM)
+			}
 		}
 	}
 
