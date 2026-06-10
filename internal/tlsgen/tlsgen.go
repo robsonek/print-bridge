@@ -53,10 +53,19 @@ func EnsureCert(certPath, keyPath string, hostnames []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writePEM(certPath, "CERTIFICATE", der, 0o644); err != nil {
+	// Key FIRST, cert LAST: EnsureCert's existence check keys on BOTH files, and
+	// the cert is the one written atomically-last. A failure at any point leaves
+	// either nothing or a key without a cert — both regenerate on next start. The
+	// old cert-first order left an orphaned cert + missing/truncated key, which
+	// passed the existence check and put the service in a restart loop forever.
+	if err := writePEM(keyPath, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key), 0o600); err != nil {
 		return err
 	}
-	return writePEM(keyPath, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key), 0o600)
+	if err := writePEM(certPath, "CERTIFICATE", der, 0o644); err != nil {
+		os.Remove(certPath) // never leave a truncated cert completing the pair
+		return err
+	}
+	return nil
 }
 
 func writePEM(path, blockType string, der []byte, perm os.FileMode) error {
@@ -64,8 +73,11 @@ func writePEM(path, blockType string, der []byte, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return pem.Encode(f, &pem.Block{Type: blockType, Bytes: der})
+	if err := pem.Encode(f, &pem.Block{Type: blockType, Bytes: der}); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func fileExists(p string) bool {

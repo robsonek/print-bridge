@@ -9,6 +9,38 @@ import (
 	"testing"
 )
 
+// Nieudany zapis klucza nie może zostawić na dysku samego certa: EnsureCert
+// sprawdza tylko ISTNIENIE plików, więc osierocony cert + brakujący/ucięty
+// klucz przechodzi check, ListenAndServeTLS pada i serwis wpada w pętlę
+// restartów bez samonaprawy.
+func TestEnsureCertKeyWriteFailureLeavesNoOrphanCert(t *testing.T) {
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "cert.pem")
+	key := filepath.Join(dir, "key.pem")
+
+	// Katalog pod ścieżką klucza wymusza błąd zapisu klucza.
+	if err := os.Mkdir(key, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCert(cert, key, []string{"localhost"}); err == nil {
+		t.Fatal("EnsureCert musi zwrócić błąd, gdy zapis klucza się nie uda")
+	}
+	if _, err := os.Stat(cert); err == nil {
+		t.Fatal("po nieudanym zapisie klucza cert.pem nie może zostać na dysku (kolejny start nigdy nie zregeneruje pary)")
+	}
+
+	// Po usunięciu przeszkody kolejny start regeneruje kompletną, działającą parę.
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCert(cert, key, []string{"localhost"}); err != nil {
+		t.Fatalf("EnsureCert po naprawieniu ścieżki: %v", err)
+	}
+	if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
+		t.Fatalf("zregenerowana para nie laduje się: %v", err)
+	}
+}
+
 func TestEnsureCertCreatesAndReuses(t *testing.T) {
 	dir := t.TempDir()
 	cert := filepath.Join(dir, "cert.pem")
