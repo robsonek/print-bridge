@@ -83,6 +83,46 @@ func TestLoadFileThenEnvOverride(t *testing.T) {
 	}
 }
 
+// main.go rzutuje RenderThreshold na uint8 — 256 owija się do 0 i każda
+// etykieta wychodzi PUSTA bez żadnego błędu. Walidacja musi to złapać
+// na starcie, zanim cokolwiek trafi do druku.
+func TestValidateRejectsOutOfRangeRenderThreshold(t *testing.T) {
+	for _, bad := range []int{-1, 256, 300} {
+		c := validConfig()
+		c.RenderThreshold = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("render_threshold=%d: Validate musi odrzucić (uint8-truncation = puste etykiety)", bad)
+		}
+	}
+	for _, ok := range []int{0, 1, 190, 255} {
+		c := validConfig()
+		c.RenderThreshold = ok
+		if err := c.Validate(); err != nil {
+			t.Errorf("render_threshold=%d: Validate musi przyjąć, got %v", ok, err)
+		}
+	}
+}
+
+// listen_port=0 binduje losowy port efemeryczny — serwis "zdrowy", ale UFW
+// przepuszcza tylko 9443, więc nikt się nie dodzwoni.
+func TestValidateRejectsOutOfRangeListenPort(t *testing.T) {
+	for _, bad := range []int{0, -1, 65536} {
+		c := validConfig()
+		c.ListenPort = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("listen_port=%d: Validate musi odrzucić", bad)
+		}
+	}
+}
+
+func validConfig() Config {
+	c := Default()
+	c.PrintToken = "t"
+	c.CUPSQueue = "q"
+	c.PrinterIP = "10.0.0.5"
+	return c
+}
+
 func TestValidateRejectsEmptyToken(t *testing.T) {
 	c := Default()
 	c.CUPSQueue = "q"

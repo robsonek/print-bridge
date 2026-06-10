@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -109,6 +110,13 @@ func (c Config) Validate() error {
 	}
 	if c.PrinterIP == "" {
 		return errors.New("printer_ip is required")
+	}
+	if c.ListenPort < 1 || c.ListenPort > 65535 {
+		return fmt.Errorf("listen_port %d out of range 1-65535", c.ListenPort)
+	}
+	// main.go narrows this to uint8; 256 would wrap to 0 and print blank labels.
+	if c.RenderThreshold < 0 || c.RenderThreshold > 255 {
+		return fmt.Errorf("render_threshold %d out of range 0-255", c.RenderThreshold)
 	}
 	return nil
 }
