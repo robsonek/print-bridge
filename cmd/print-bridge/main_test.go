@@ -1,13 +1,56 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/robsonek/print-bridge/internal/printer"
 )
+
+type fakeCleaner struct {
+	n   int64
+	err error
+}
+
+func (f fakeCleaner) Cleanup(time.Time) (int64, error) { return f.n, f.err }
+
+// Połknięty błąd Cleanup = baza idempotencji rośnie latami bez śladu w logach.
+// Każdy nieudany cykl czyszczenia musi zostawić wpis.
+func TestCleanupOnceLogsErrors(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer() // przed SetOutput: argumenty defer ewaluują się od razu
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	cleanupOnce(fakeCleaner{err: errors.New("database is locked")}, time.Now())
+	if !strings.Contains(buf.String(), "database is locked") {
+		t.Errorf("błąd Cleanup musi trafić do loga, got: %q", buf.String())
+	}
+}
+
+func TestCleanupOnceLogsRemovedRows(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	cleanupOnce(fakeCleaner{n: 7}, time.Now())
+	if !strings.Contains(buf.String(), "7") {
+		t.Errorf("liczba usuniętych wierszy musi trafić do loga, got: %q", buf.String())
+	}
+
+	buf.Reset()
+	cleanupOnce(fakeCleaner{n: 0}, time.Now())
+	if buf.Len() != 0 {
+		t.Errorf("0 usuniętych i brak błędu = cisza w logu, got: %q", buf.String())
+	}
+}
 
 type fakeReach struct {
 	online bool

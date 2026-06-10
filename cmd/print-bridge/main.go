@@ -238,13 +238,27 @@ func makeHealth(reach reachabilityProbe, probe hostStatusProbe, cups cupsReasons
 	}
 }
 
+type cleaner interface {
+	Cleanup(time.Time) (int64, error)
+}
+
 func cleanupLoop(store *idempotency.Store) {
 	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()
 	for range t.C {
-		if n, err := store.Cleanup(time.Now()); err == nil && n > 0 {
-			log.Printf("idempotency cleanup: removed %d expired rows", n)
-		}
+		cleanupOnce(store, time.Now())
+	}
+}
+
+// cleanupOnce logs failures too: a silently failing Cleanup lets the
+// idempotency DB grow for years with no trace in the logs.
+func cleanupOnce(s cleaner, now time.Time) {
+	n, err := s.Cleanup(now)
+	switch {
+	case err != nil:
+		log.Printf("idempotency cleanup error: %v", err)
+	case n > 0:
+		log.Printf("idempotency cleanup: removed %d expired rows", n)
 	}
 }
 
