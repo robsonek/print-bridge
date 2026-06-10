@@ -50,7 +50,29 @@ fi
 echo "=== $(date -Is) update-bridge.sh start tag=${TAG} arch=${ARCH}"
 sleep 3
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+BIN="$INSTALL_DIR/print-bridge"
+BAK="$INSTALL_DIR/print-bridge.bak"
+STOPPED=0
+UPDATE_OK=0
+
+# Rollback: KAŻDA porażka po `systemctl stop` (nieudany install, nowa binarka
+# padająca na starcie, timeout health-checka) bez tego trapa zostawiała serwis
+# trwale wyłączony ze starą binarką już nadpisaną — zdalny self-update potrafił
+# zaciemnić maszynę do ręcznego ssh. Przed stopem binarka idzie do $BAK; trap
+# przywraca ją i restartuje serwis, o ile update nie zdążył się powieść.
+rollback_on_failure() {
+  rm -rf "$TMP"
+  if [ "$UPDATE_OK" = 1 ] || [ "$STOPPED" = 0 ]; then
+    return
+  fi
+  echo "=== $(date -Is) ERROR: update nieudany — rollback do poprzedniej binarki" >&2
+  install -m 0755 "$BAK" "$BIN"
+  chown print-bridge:print-bridge "$BIN"
+  if ! systemctl restart print-bridge; then
+    echo "=== $(date -Is) ERROR: serwis nie wstał po rollbacku — wymagana ręczna interwencja" >&2
+  fi
+}
+trap rollback_on_failure EXIT
 
 # Download under the REAL asset name. release.yml builds the .sha256 with
 # `sha256sum "$TARBALL"` where TARBALL == $ASSET, so the checksum file embeds that
@@ -68,7 +90,11 @@ curl -fsSL "${URL}.sha256" -o "$TMP/${ASSET}.sha256"
 (cd "$TMP" && sha256sum -c "${ASSET}.sha256")
 
 tar -xzf "$TMP/$ASSET" -C "$TMP"
+# Backup PRZED stopem: między stopem a backupem nie może być okna, w którym
+# porażka gubi ostatnią działającą binarkę.
+cp -f "$BIN" "$BAK"
 systemctl stop print-bridge
+STOPPED=1
 install -m 0755 "$TMP/print-bridge" "$INSTALL_DIR/print-bridge"
 # CUPS backend lives outside INSTALL_DIR and must stay root-owned (cupsd runs
 # backends only from /usr/lib/cups/backend; see install-debian.sh).
@@ -97,10 +123,20 @@ systemctl start print-bridge
 
 for i in $(seq 1 15); do
   sleep 2
-  if curl -fsk "https://localhost:9443/api/v1/health" | grep -q "$(echo "${TAG#v}")"; then
+  # -F + pełne pole JSON: niezakotwiczony `grep 1.0.0` traktuje kropki jak
+  # wildcardy i łapie podciągi (np. adresy IP) — fałszywy sukces update'u.
+  if curl -fsk "https://localhost:9443/api/v1/health" | grep -qF "\"version\":\"${TAG#v}\""; then
+    UPDATE_OK=1
+    rm -f "$BAK"
     echo "=== $(date -Is) update to ${TAG} verified"
     exit 0
   fi
+  # Nowa binarka już martwa (systemd: failed) — nie ma na co czekać 30 s,
+  # exit 1 odpala rollback z trapa.
+  if systemctl is-failed --quiet print-bridge; then
+    echo "=== $(date -Is) ERROR: serwis w stanie failed po starcie ${TAG}" >&2
+    exit 1
+  fi
 done
-echo "=== $(date -Is) warning: /health did not report version ${TAG#v} after restart" >&2
+echo "=== $(date -Is) ERROR: /health nie raportuje wersji ${TAG#v} po restarcie — rollback" >&2
 exit 1

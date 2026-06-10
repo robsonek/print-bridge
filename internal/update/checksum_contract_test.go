@@ -107,6 +107,62 @@ func TestUpdateChecksumFilenameContract(t *testing.T) {
 	}
 }
 
+// TestUpdaterRollbackContract locks the fail-safe shape of update-bridge.sh.
+// The old script ran `systemctl stop` -> `install` -> `systemctl start` with
+// set -e and NO backup: any failure after the stop (failed install, new binary
+// crashing on boot, health check timeout) left the box with the service DOWN
+// and the old binary already overwritten — a remote self-update could brick
+// the agent until someone ssh-ed in. The updater must:
+//  1. back up the current binary BEFORE stopping the service,
+//  2. roll back + restart via an EXIT trap on any failure after the stop,
+//  3. verify health against the exact `"version":"X"` JSON field (an
+//     unanchored `grep 1.0.0` matches dots as wildcards / substrings),
+//  4. fast-fail the 30 s health loop when systemd already reports `failed`.
+func TestUpdaterRollbackContract(t *testing.T) {
+	root := repoRoot(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "deploy", "update-bridge.sh"))
+	if err != nil {
+		t.Fatalf("read update-bridge.sh: %v", err)
+	}
+	script := string(scriptBytes)
+
+	// 1) Backup before stop (and the backup must be the running binary).
+	// The stop COMMAND is anchored at line start — the cgroup-escape comment
+	// higher up mentions `systemctl stop print-bridge` in prose.
+	backupIdx := strings.Index(script, `cp -f "$BIN" "$BAK"`)
+	stopIdx := -1
+	if loc := regexp.MustCompile(`(?m)^systemctl stop print-bridge`).FindStringIndex(script); loc != nil {
+		stopIdx = loc[0]
+	}
+	if backupIdx == -1 {
+		t.Error(`update-bridge.sh must back up the current binary: cp -f "$BIN" "$BAK"`)
+	}
+	if stopIdx == -1 {
+		t.Error("update-bridge.sh must stop the service before replacing the binary")
+	}
+	if backupIdx != -1 && stopIdx != -1 && backupIdx > stopIdx {
+		t.Error("the binary backup must happen BEFORE systemctl stop (a failure between stop and backup would lose the last-known-good binary)")
+	}
+
+	// 2) EXIT trap that restores the backup and restarts the service.
+	if !regexp.MustCompile(`trap\s+\S*rollback\S*\s+EXIT`).MatchString(script) {
+		t.Error("update-bridge.sh must register a rollback EXIT trap (any post-stop failure must restore the old binary)")
+	}
+	if !strings.Contains(script, `install -m 0755 "$BAK" "$BIN"`) {
+		t.Error(`the rollback path must reinstall the backup: install -m 0755 "$BAK" "$BIN"`)
+	}
+
+	// 3) Health check anchored to the version JSON field, fixed-string match.
+	if !strings.Contains(script, `grep -qF "\"version\":\"${TAG#v}\""`) {
+		t.Error(`health verification must use grep -qF "\"version\":\"${TAG#v}\"" (unanchored grep treats dots as wildcards and matches substrings)`)
+	}
+
+	// 4) Fast-fail when the new binary is already dead instead of polling 30 s.
+	if !strings.Contains(script, "systemctl is-failed") {
+		t.Error("the health loop must fast-fail on `systemctl is-failed` (new binary crashing on start)")
+	}
+}
+
 // TestSha256VerificationEndToEnd reproduces the real release/update flow end to
 // end: it builds a .sha256 file exactly as release.yml does (embedding the real
 // asset filename), then runs `sha256sum -c` exactly as update-bridge.sh does
