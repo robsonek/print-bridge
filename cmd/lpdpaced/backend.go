@@ -14,8 +14,9 @@ import (
 // CUPS backend exit codes (cups/backend.h).
 const (
 	exitOK        = 0 // CUPS_BACKEND_OK
-	exitFailed    = 1 // CUPS_BACKEND_FAILED
+	exitFailed    = 1 // CUPS_BACKEND_FAILED (decyzję podejmuje error-policy drukarki)
 	exitStopQueue = 4 // CUPS_BACKEND_STOP
+	exitCancel    = 5 // CUPS_BACKEND_CANCEL (job skasowany bezwarunkowo — błędy trwałe)
 	exitRetry     = 6 // CUPS_BACKEND_RETRY
 )
 

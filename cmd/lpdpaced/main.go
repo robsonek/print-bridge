@@ -37,13 +37,16 @@ func main() {
 }
 
 func run() int {
-	args := os.Args
+	return runWith(os.Args, os.Stdin, os.Stderr)
+}
+
+func runWith(args []string, stdin io.Reader, stderr io.Writer) int {
 	if len(args) == 1 {
 		fmt.Println(discoveryLine())
 		return exitOK
 	}
 	if len(args) < 6 || len(args) > 7 {
-		fmt.Fprintf(os.Stderr, "ERROR: użycie: %s job-id user title copies options [file]\n", args[0])
+		fmt.Fprintf(stderr, "ERROR: użycie: %s job-id user title copies options [file]\n", args[0])
 		return exitFailed
 	}
 
@@ -53,29 +56,32 @@ func run() int {
 	}
 	cfg, err := parseDeviceURI(uri)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		fmt.Fprintf(stderr, "ERROR: %v\n", err)
 		return exitCodeFor(err)
 	}
 
 	jobID, _ := strconv.Atoi(args[1])
 	user := args[2]
 	title := args[3]
-	copies, _ := strconv.Atoi(args[4])
+	copies := parseCopies(args[4], stderr)
 
 	var data []byte
 	if len(args) == 7 {
 		data, err = os.ReadFile(args[6])
 	} else {
-		data, err = io.ReadAll(os.Stdin)
+		data, err = io.ReadAll(stdin)
 		copies = 1 // stdin: cupsd dostarcza strumień dokładnie raz
 	}
+	// Pusty/nieczytelny spool to błąd TRWAŁY: retry nic nie zmieni, a exitFailed
+	// oddaje decyzję error-policy (stop-printer potrafi zatrzymać kolejkę).
+	// CUPS_BACKEND_CANCEL kasuje job bezwarunkowo i kolejka żyje dalej.
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: czytanie danych joba: %v\n", err)
-		return exitFailed
+		fmt.Fprintf(stderr, "ERROR: czytanie danych joba: %v\n", err)
+		return exitCancel
 	}
 	if len(data) == 0 {
-		fmt.Fprintln(os.Stderr, "ERROR: pusty job")
-		return exitFailed
+		fmt.Fprintln(stderr, "ERROR: pusty job")
+		return exitCancel
 	}
 	payload := buildPayload(data, copies)
 
@@ -95,12 +101,26 @@ func run() int {
 		ChunkSize: cfg.chunk,
 		Timeout:   cfg.timeout,
 	}
-	fmt.Fprintf(os.Stderr, "INFO: wysyłam %d B do %s/%s (pacing %d B/s)\n",
+	fmt.Fprintf(stderr, "INFO: wysyłam %d B do %s/%s (pacing %d B/s)\n",
 		len(payload), cfg.addr, cfg.queue, cfg.rateBps)
 	if err := client.Print(ctx, payload, jobID, user, title); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		fmt.Fprintf(stderr, "ERROR: %v\n", err)
 		return exitCodeFor(err)
 	}
-	fmt.Fprintf(os.Stderr, "INFO: print-server potwierdził odbiór %d B\n", len(payload))
+	fmt.Fprintf(stderr, "INFO: print-server potwierdził odbiór %d B\n", len(payload))
 	return exitOK
+}
+
+// parseCopies parses CUPS argv[4]; garbage is announced and treated as one
+// copy instead of being silently swallowed as 0.
+func parseCopies(s string, stderr io.Writer) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		fmt.Fprintf(stderr, "WARNING: copies=%q nieparsowalne — drukuję 1 kopię\n", s)
+		return 1
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
 }
