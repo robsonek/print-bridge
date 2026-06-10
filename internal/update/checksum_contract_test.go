@@ -156,6 +156,17 @@ func TestUpdaterRollbackContract(t *testing.T) {
 	if !strings.Contains(script, `grep -qF "\"version\":\"${TAG#v}\""`) {
 		t.Error(`health verification must use grep -qF "\"version\":\"${TAG#v}\"" (unanchored grep treats dots as wildcards and matches substrings)`)
 	}
+	// 3a) ...and the health curl must NOT use -f: /health returns 503 when
+	// DEGRADED (printer off, cupsd down) while still carrying the version in
+	// the body. curl -f discards that body, the grep misses, and the rollback
+	// trap reverts a perfectly good binary just because the printer was
+	// offline during the update window. Update verification asserts "new
+	// binary runs and reports its version", not "printer healthy".
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "api/v1/health") && regexp.MustCompile(`curl\s+-[a-z]*f`).MatchString(line) {
+			t.Errorf("the /health verification curl must not use -f (503-degraded discards the body and triggers a false rollback): %q", strings.TrimSpace(line))
+		}
+	}
 
 	// 4) Fast-fail when the new binary is already dead instead of polling 30 s.
 	if !strings.Contains(script, "systemctl is-failed") {

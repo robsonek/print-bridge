@@ -125,7 +125,10 @@ for i in $(seq 1 15); do
   sleep 2
   # -F + pełne pole JSON: niezakotwiczony `grep 1.0.0` traktuje kropki jak
   # wildcardy i łapie podciągi (np. adresy IP) — fałszywy sukces update'u.
-  if curl -fsk "https://localhost:9443/api/v1/health" | grep -qF "\"version\":\"${TAG#v}\""; then
+  # BEZ -f: /health zwraca 503 przy degraded (drukarka off, cupsd down), ale
+  # body wciąż niesie wersję — z -f curl wyrzuca body i trap cofałby DOBRĄ
+  # binarkę tylko dlatego, że drukarka była offline w oknie update'u.
+  if curl -sk "https://localhost:9443/api/v1/health" | grep -qF "\"version\":\"${TAG#v}\""; then
     UPDATE_OK=1
     rm -f "$BAK"
     echo "=== $(date -Is) update to ${TAG} verified"
