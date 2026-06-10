@@ -2,8 +2,10 @@
 
 Agent druku etykiet termicznych (Go) dla Xprinter XP-423B przez CUPS. Companion
 dla `the marketplace orchestrator`. Przyjmuje ZPL (passthrough) lub PDF
-(render→ZPL `^GFA` z kompresją RLE), drukuje przez raw queue CUPS z własnym
-backendem `lpdpaced`, potwierdza FIZYCZNE zakończenie druku przez ZPL `~HS`.
+(render→ZPL `^GFA` z kompresją RLE; guard MediaBox odrzuca PDF-y szersze niż
+rolka — sprawdzana KAŻDA strona, nie tylko pierwsza), drukuje przez raw queue
+CUPS z własnym backendem `lpdpaced`, potwierdza FIZYCZNE zakończenie druku
+przez ZPL `~HS`.
 
 ## Endpointy
 - `POST /api/v1/print-jobs` — `X-Print-Token` + `Idempotency-Key`; body
@@ -21,13 +23,21 @@ backendem `lpdpaced`, potwierdza FIZYCZNE zakończenie druku przez ZPL `~HS`.
   latched `Paper Jam` i zawieszony responder 9100 (`function.cgi?func=reset`),
   zbuforowany job dokańcza się; 409 `PRINTER_BUSY` gdy trwa druk (retryable).
 - `POST /api/v1/admin/update` — self-update do tagu release (sudo → transient
-  unit systemd; log: `data/update.log`).
+  unit systemd; log: `data/update.log`). Od v0.5.3 fail-safe: backup binarki
+  przed stopem + trap EXIT przywracający ją i restartujący serwis przy KAŻDEJ
+  porażce po stopie (nieudany install, binarka padająca na starcie — fast-fail
+  na `systemctl is-failed` — albo timeout weryfikacji); od v0.5.4 weryfikacja
+  `/health` czyta pole `"version"` także przy 503 degraded (drukarka offline
+  w oknie update'u nie cofa dobrej binarki).
 
 ## Specyfika sprzętu (XP-423B, zmierzone na żywo)
 - Print-server (10/100, Ethernut) gubi pakiety przy wysyłce >40-60 KB/s z GbE
   Linuxa — backend `lpdpaced` sączy dane ~20 KB/s
   (device-uri `lpdpaced://<ip>/lp?rate=20000`); bez tego multi-label job
-  wlecze się 30-50 s („druga etykieta po minucie").
+  wlecze się 30-50 s („druga etykieta po minucie"). Błędy sieciowe →
+  `CUPS_BACKEND_RETRY` (niekompletny job LPD print-server odrzuca, retry
+  bezpieczny); błędy trwałe (pusty/nieczytelny spool) → `CUPS_BACKEND_CANCEL`,
+  żeby error-policy nie zatrzymała kolejki ani nie zapętliła joba.
 - Pole [8] linii 2 `~HS`: w trakcie druku flaga batcha (0/1, sygnał „ostatnia
   etykieta wyszła"), po boocie/cyklu głowicy wyciek licznika mediów z NVRAM —
   stąd guard wiarygodności `<10000`.
@@ -53,8 +63,17 @@ agenta (`/opt/print-bridge`, systemd), backend CUPS
 instalacji `config.json` jest seedowany automatycznie: `printer_ip` i
 `cups_queue` z argumentów + wygenerowany `print_token` (wypisany na końcu —
 przekaż go orchestratorowi); ponowna instalacja NIE rusza istniejącego
-configu. Przed produkcją `ufw allow ssh && ufw enable`. Aktualizacja ręczna:
-`sudo update-bridge.sh <tag>`. Patrz `deploy/`.
+configu. Config jest walidowany na starcie (m.in. `render_threshold` 0-255 —
+wartość spoza zakresu owijała się przez uint8 i drukowała PUSTE etykiety;
+`listen_port` 1-65535). Przed produkcją `ufw allow ssh && ufw enable`.
+Aktualizacja ręczna: `sudo update-bridge.sh <tag>`. Patrz `deploy/`.
+
+Znane środowiskowe: na minimalnym Debianie (bez `colord`) `cups-browsed`
+potrafi ZAWIESIĆ cupsd — synchroniczne wywołania D-Bus `CreateProfile`/
+`CreateDevice` blokują scheduler po 25 s każde i IPP na :631 przestaje
+odpowiadać (`cups_reachable:false` w `/health` mimo `systemctl` „active").
+Kolejka agenta jest statyczna, discovery zbędne:
+`systemctl disable --now cups-browsed && systemctl restart cups`.
 
 ## Wymagania runtime
 - CUPS + `cups-client` (raw queue przez backend `lpdpaced`)
