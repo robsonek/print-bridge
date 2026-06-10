@@ -7,6 +7,18 @@ QUEUE="${2:-xp423b}"
 ALLOW_CIDR="${3:?egress CIDR of the orchestrator required}"
 INSTALL_DIR=/opt/print-bridge
 
+# Both values are interpolated into sed (delimiter '#') and a device URI below;
+# an unexpected character would silently corrupt config.json seeding (the box
+# then 503s every print) or the CUPS queue URI. Fail loudly up front instead.
+if ! [[ "$PRINTER_IP" =~ ^[0-9A-Za-z._-]+$ ]]; then
+  echo "ERROR: printer_ip ${PRINTER_IP@Q} zawiera niedozwolone znaki (dozwolone: [0-9A-Za-z._-])" >&2
+  exit 1
+fi
+if ! [[ "$QUEUE" =~ ^[0-9A-Za-z._-]+$ ]]; then
+  echo "ERROR: cups_queue ${QUEUE@Q} zawiera niedozwolone znaki (dozwolone: [0-9A-Za-z._-])" >&2
+  exit 1
+fi
+
 apt-get update
 apt-get install -y cups cups-client poppler-utils ufw openssl
 
