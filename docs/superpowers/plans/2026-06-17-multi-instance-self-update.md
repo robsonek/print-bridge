@@ -329,8 +329,10 @@ URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 
 # Port health-checka z config.json TEJ instancji (nie sztywne 9443). Bez jq —
 # nie ma go w zależnościach installera; grep wyłuskuje liczbę, fallback 9443.
-PORT="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$INSTALL_DIR/config.json" 2>/dev/null | grep -oE '[0-9]+' | head -n1)"
-[ -n "$PORT" ] || PORT=9443
+PORT=9443
+if cfg_port="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$INSTALL_DIR/config.json" 2>/dev/null | grep -oE '[0-9]+' | head -n1)" && [ -n "$cfg_port" ]; then
+  PORT="$cfg_port"
+fi
 ```
 
 - [ ] **Step 3: Skieruj cgroup-escape na właściwy unit**
@@ -372,6 +374,8 @@ W `deploy/update-bridge.sh` zamień (każde wystąpienie nazwy unitu i portu poc
 
 Run: `bash -n deploy/update-bridge.sh && command -v shellcheck >/dev/null && shellcheck -S warning deploy/update-bridge.sh || echo "shellcheck pominięty (brak w PATH)"`
 Expected: `bash -n` bez wyjścia (OK); shellcheck bez błędów krytycznych (warningi typu SC2086 dla `${INSTANCE:+...}` są zamierzone — celowo bez cudzysłowów dla pominięcia pustego argu).
+
+- Każda zmiana w `deploy/update-bridge.sh` musi też przejść `go test ./internal/update/` — testy kontraktowe Go (`checksum_contract_test.go`) asercjują na TEKŚCIE skryptu (kotwice `systemctl stop "$SERVICE"`, `grep -qF "\"version\":\"${TAG#v}\""`, zakaz `|| true`, nazwa `$ASSET` przy sha256sum), więc parametryzacja czy refaktor skryptu potrafi je zerwać niezależnie od `bash -n`/shellcheck.
 
 - [ ] **Step 6: Weryfikacja guard-rejection (bezpieczna, kończy się przed efektami)**
 

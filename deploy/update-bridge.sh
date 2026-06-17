@@ -43,8 +43,10 @@ URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 
 # Port health-checka z config.json TEJ instancji (nie sztywne 9443). Bez jq —
 # nie ma go w zależnościach installera; grep wyłuskuje liczbę, fallback 9443.
-PORT="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$INSTALL_DIR/config.json" 2>/dev/null | grep -oE '[0-9]+' | head -n1)"
-[ -n "$PORT" ] || PORT=9443
+PORT=9443
+if cfg_port="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$INSTALL_DIR/config.json" 2>/dev/null | grep -oE '[0-9]+' | head -n1)" && [ -n "$cfg_port" ]; then
+  PORT="$cfg_port"
+fi
 
 # Ucieczka z cgroupy serwisu: gdy spawnuje nas agent (sudo z wnętrza
 # print-bridge.service), `systemctl stop print-bridge` niżej zabiłoby TEN
