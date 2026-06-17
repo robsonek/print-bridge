@@ -17,14 +17,34 @@ if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
   exit 1
 fi
 
+INSTANCE="${2:-}"
+# Slug instancji leci do ścieżek i nazwy unitu systemd — ściśle ograniczony
+# (bez '/', '..', spacji), inaczej ucieczka ścieżki / wstrzyknięcie do systemctl.
+# Pusty = instancja podstawowa (zachowanie sprzed wieloinstancyjności).
+if [ -n "$INSTANCE" ] && ! [[ "$INSTANCE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  echo "ERROR: invalid instance ${INSTANCE@Q} (expected slug [a-z0-9-])" >&2
+  exit 1
+fi
+
 REPO="robsonek/print-bridge"
-INSTALL_DIR=/opt/print-bridge
+if [ -n "$INSTANCE" ]; then
+  INSTALL_DIR="/opt/print-bridge-${INSTANCE}"
+  SERVICE="print-bridge-${INSTANCE}"
+else
+  INSTALL_DIR=/opt/print-bridge
+  SERVICE=print-bridge
+fi
 SELF=/usr/local/sbin/update-bridge.sh
 SUDOERS=/etc/sudoers.d/print-bridge
 LOGFILE="$INSTALL_DIR/data/update.log"
 ARCH="$(dpkg --print-architecture)" # amd64 / arm64
 ASSET="print-bridge-${TAG#v}-linux-${ARCH}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+
+# Port health-checka z config.json TEJ instancji (nie sztywne 9443). Bez jq —
+# nie ma go w zależnościach installera; grep wyłuskuje liczbę, fallback 9443.
+PORT="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$INSTALL_DIR/config.json" 2>/dev/null | grep -oE '[0-9]+' | head -n1)"
+[ -n "$PORT" ] || PORT=9443
 
 # Ucieczka z cgroupy serwisu: gdy spawnuje nas agent (sudo z wnętrza
 # print-bridge.service), `systemctl stop print-bridge` niżej zabiłoby TEN
@@ -34,20 +54,20 @@ URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 # transient unitu (osobna cgroupa) z dopisywaniem wyjścia do LOGFILE.
 # Ręczne `sudo update-bridge.sh` (spoza cgroupy serwisu) zostaje inline i
 # pisze na terminal operatora.
-if [ -z "${PB_UPDATE_DETACHED:-}" ] && grep -qs 'print-bridge\.service' /proc/self/cgroup; then
+if [ -z "${PB_UPDATE_DETACHED:-}" ] && grep -qsF "${SERVICE}.service" /proc/self/cgroup; then
   if command -v systemd-run >/dev/null; then
-    echo "re-exec do transient unitu (poza cgroupą print-bridge.service)"
+    echo "re-exec do transient unitu (poza cgroupą ${SERVICE}.service)"
     exec systemd-run --collect --quiet \
-      --unit="print-bridge-update-$(date +%s)" \
+      --unit="${SERVICE}-update-$(date +%s)" \
       --property=StandardOutput="append:${LOGFILE}" \
       --property=StandardError="append:${LOGFILE}" \
       --setenv=PB_UPDATE_DETACHED=1 \
-      "$SELF" "$TAG"
+      "$SELF" "$TAG" ${INSTANCE:+"$INSTANCE"}
   fi
   echo "WARNING: brak systemd-run — kontynuuję w cgroupie serwisu (systemctl stop może zabić updater)" >&2
 fi
 
-echo "=== $(date -Is) update-bridge.sh start tag=${TAG} arch=${ARCH}"
+echo "=== $(date -Is) update-bridge.sh start tag=${TAG} instance=${INSTANCE:-<primary>} arch=${ARCH}"
 sleep 3
 TMP="$(mktemp -d)"
 BIN="$INSTALL_DIR/print-bridge"
@@ -68,7 +88,7 @@ rollback_on_failure() {
   echo "=== $(date -Is) ERROR: update nieudany — rollback do poprzedniej binarki" >&2
   install -m 0755 "$BAK" "$BIN"
   chown print-bridge:print-bridge "$BIN"
-  if ! systemctl restart print-bridge; then
+  if ! systemctl restart "$SERVICE"; then
     echo "=== $(date -Is) ERROR: serwis nie wstał po rollbacku — wymagana ręczna interwencja" >&2
   fi
 }
@@ -93,7 +113,7 @@ tar -xzf "$TMP/$ASSET" -C "$TMP"
 # Backup PRZED stopem: między stopem a backupem nie może być okna, w którym
 # porażka gubi ostatnią działającą binarkę.
 cp -f "$BIN" "$BAK"
-systemctl stop print-bridge
+systemctl stop "$SERVICE"
 STOPPED=1
 install -m 0755 "$TMP/print-bridge" "$INSTALL_DIR/print-bridge"
 # CUPS backend lives outside INSTALL_DIR and must stay root-owned (cupsd runs
@@ -119,16 +139,16 @@ else
 fi
 
 chown -R print-bridge:print-bridge "$INSTALL_DIR"
-systemctl start print-bridge
+systemctl start "$SERVICE"
 
-for i in $(seq 1 15); do
+for _ in $(seq 1 15); do
   sleep 2
   # -F + pełne pole JSON: niezakotwiczony `grep 1.0.0` traktuje kropki jak
   # wildcardy i łapie podciągi (np. adresy IP) — fałszywy sukces update'u.
   # BEZ -f: /health zwraca 503 przy degraded (drukarka off, cupsd down), ale
   # body wciąż niesie wersję — z -f curl wyrzuca body i trap cofałby DOBRĄ
   # binarkę tylko dlatego, że drukarka była offline w oknie update'u.
-  if curl -sk "https://localhost:9443/api/v1/health" | grep -qF "\"version\":\"${TAG#v}\""; then
+  if curl -sk "https://localhost:${PORT}/api/v1/health" | grep -qF "\"version\":\"${TAG#v}\""; then
     UPDATE_OK=1
     rm -f "$BAK"
     echo "=== $(date -Is) update to ${TAG} verified"
@@ -136,7 +156,7 @@ for i in $(seq 1 15); do
   fi
   # Nowa binarka już martwa (systemd: failed) — nie ma na co czekać 30 s,
   # exit 1 odpala rollback z trapa.
-  if systemctl is-failed --quiet print-bridge; then
+  if systemctl is-failed --quiet "$SERVICE"; then
     echo "=== $(date -Is) ERROR: serwis w stanie failed po starcie ${TAG}" >&2
     exit 1
   fi
