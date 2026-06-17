@@ -35,7 +35,7 @@ func TestSpawnUpdaterRunsViaSudoAndLogs(t *testing.T) {
 	t.Cleanup(func() { sudoBin = orig })
 
 	logPath := dir + "/update.log"
-	if err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", logPath, "v1.2.3"); err != nil {
+	if err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", logPath, "v1.2.3", ""); err != nil {
 		t.Fatalf("SpawnUpdater: %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestSpawnUpdaterRunsViaSudoAndLogs(t *testing.T) {
 func TestSpawnUpdaterRejectsBadTagBeforeSpawning(t *testing.T) {
 	dir := t.TempDir()
 	logPath := dir + "/update.log"
-	if err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", logPath, "latest; rm -rf /"); err == nil {
+	if err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", logPath, "latest; rm -rf /", ""); err == nil {
 		t.Fatal("zły tag musi być odrzucony przed spawnem")
 	}
 	if _, err := os.Stat(logPath); err == nil {
@@ -69,8 +69,46 @@ func TestSpawnUpdaterRejectsBadTagBeforeSpawning(t *testing.T) {
 }
 
 func TestSpawnUpdaterUnwritableLogIsError(t *testing.T) {
-	err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", "/nonexistent-dir/update.log", "v1.2.3")
+	err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", "/nonexistent-dir/update.log", "v1.2.3", "")
 	if err == nil {
 		t.Fatal("niezapisywalny log musi zwrócić błąd (inaczej updater znowu umiera po cichu)")
+	}
+}
+
+func TestSpawnUpdaterAppendsInstance(t *testing.T) {
+	dir := t.TempDir()
+	fake := dir + "/fake-sudo"
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"FAKE-SUDO $@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := sudoBin
+	sudoBin = fake
+	t.Cleanup(func() { sudoBin = orig })
+
+	logPath := dir + "/update.log"
+	if err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", logPath, "v1.2.3", "2"); err != nil {
+		t.Fatalf("SpawnUpdater: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		b, _ := os.ReadFile(logPath)
+		if strings.Contains(string(b), "FAKE-SUDO -n /usr/local/sbin/update-bridge.sh v1.2.3 2") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log nie zawiera argu instancji: %q", string(b))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestSpawnUpdaterRejectsBadInstance(t *testing.T) {
+	dir := t.TempDir()
+	logPath := dir + "/update.log"
+	if err := SpawnUpdater("/usr/local/sbin/update-bridge.sh", logPath, "v1.2.3", "../evil"); err == nil {
+		t.Fatal("zły slug instancji musi być odrzucony przed spawnem")
+	}
+	if _, err := os.Stat(logPath); err == nil {
+		t.Error("zły slug nie powinien nawet tworzyć logu")
 	}
 }
