@@ -24,6 +24,7 @@ import (
 )
 
 var tagRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-.][0-9A-Za-z]+)*$`)
+var instanceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // sudoBin is a var so tests can substitute a fake sudo.
 var sudoBin = "sudo"
@@ -35,12 +36,16 @@ func ValidateTag(tag string) error {
 	return nil
 }
 
-// SpawnUpdater validates the tag, then launches scriptPath detached via
-// `sudo -n`, appending the updater's combined output to logPath so a failed
-// update is diagnosable after the fact.
-func SpawnUpdater(scriptPath, logPath, tag string) error {
+// SpawnUpdater validates tag (and instance, when set), then launches scriptPath
+// detached via `sudo -n`, appending the updater's combined output to logPath. The
+// instance slug is forwarded as the script's 2nd arg ONLY when non-empty, so a
+// primary-instance update is byte-for-byte the pre-multi-instance invocation.
+func SpawnUpdater(scriptPath, logPath, tag, instance string) error {
 	if err := ValidateTag(tag); err != nil {
 		return err
+	}
+	if instance != "" && !instanceRe.MatchString(instance) {
+		return fmt.Errorf("invalid instance %q (expected slug [a-z0-9-])", instance)
 	}
 	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -49,10 +54,14 @@ func SpawnUpdater(scriptPath, logPath, tag string) error {
 	// The child inherits a dup of the fd at Start(); the parent's copy can be
 	// closed right after.
 	defer logf.Close()
-	fmt.Fprintf(logf, "=== %s spawn updater tag=%s script=%s\n",
-		time.Now().Format(time.RFC3339), tag, scriptPath)
+	fmt.Fprintf(logf, "=== %s spawn updater tag=%s instance=%q script=%s\n",
+		time.Now().Format(time.RFC3339), tag, instance, scriptPath)
 
-	cmd := exec.Command(sudoBin, "-n", scriptPath, tag)
+	args := []string{"-n", scriptPath, tag}
+	if instance != "" {
+		args = append(args, instance)
+	}
+	cmd := exec.Command(sudoBin, args...)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

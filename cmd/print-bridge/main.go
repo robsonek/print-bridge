@@ -96,8 +96,8 @@ func main() {
 		Updater: func(tag string) error {
 			script := updaterScript(exeDir)
 			logPath := absUnder(exeDir, "data/update.log")
-			log.Printf("admin/update: spawning updater tag=%s script=%s log=%s", tag, script, logPath)
-			return update.SpawnUpdater(script, logPath, tag)
+			log.Printf("admin/update: spawning updater tag=%s instance=%q script=%s log=%s", tag, cfg.Instance, script, logPath)
+			return update.SpawnUpdater(script, logPath, tag, cfg.Instance)
 		},
 		// #27: server-side upper bound for the whole print op (exec lp + every
 		// JobState IPP round-trip + verify), so a hung cupsd `lp` held open by a
