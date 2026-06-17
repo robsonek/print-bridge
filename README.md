@@ -68,6 +68,21 @@ wartość spoza zakresu owijała się przez uint8 i drukowała PUSTE etykiety;
 `listen_port` 1-65535). Przed produkcją `ufw allow ssh && ufw enable`.
 Aktualizacja ręczna: `sudo update-bridge.sh <tag>`. Patrz `deploy/`.
 
+## Druga drukarka na tej samej VM
+
+Każda instancja agenta obsługuje jedną drukarkę. Drugą stawiasz osobną instancją
+na tym samym Debianie — nie potrzeba nowej VM:
+
+```bash
+sudo ./install-debian.sh <ip_drukarki_2> <kolejka_cups_2> <egress_cidr> 2 9444
+```
+
+Slug `2` daje katalog `/opt/print-bridge-2`, usługę `print-bridge-2.service` i
+config z `"instance": "2"`, `"listen_port": 9444`. Self-update przez API
+(`POST /api/v1/admin/update`) trafia wtedy w tę instancję — wspólny root-owny
+`update-bridge.sh` wylicza cel ze slugu z config.json. Instancja podstawowa
+(bez slugu) działa jak dotąd: `/opt/print-bridge`, `print-bridge.service`, 9443.
+
 Znane środowiskowe: na minimalnym Debianie (bez `colord`) `cups-browsed`
 potrafi ZAWIESIĆ cupsd — synchroniczne wywołania D-Bus `CreateProfile`/
 `CreateDevice` blokują scheduler po 25 s każde i IPP na :631 przestaje
