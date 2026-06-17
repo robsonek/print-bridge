@@ -131,3 +131,45 @@ func TestValidateRejectsEmptyToken(t *testing.T) {
 		t.Fatal("Validate must reject empty token")
 	}
 }
+
+func TestLoadInstanceFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	os.WriteFile(path, []byte(`{"print_token":"t","cups_queue":"q","printer_ip":"1.2.3.4","instance":"2"}`), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Instance != "2" {
+		t.Errorf("instance = %q, want \"2\"", c.Instance)
+	}
+}
+
+func TestInstanceDefaultsEmpty(t *testing.T) {
+	c, err := Load(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Instance != "" {
+		t.Errorf("default instance = %q, want empty (primary)", c.Instance)
+	}
+}
+
+func TestValidateInstanceSlug(t *testing.T) {
+	good := []string{"", "2", "warehouse", "label-2", "a1"}
+	for _, s := range good {
+		c := validConfig()
+		c.Instance = s
+		if err := c.Validate(); err != nil {
+			t.Errorf("instance %q: Validate musi przyjąć, got %v", s, err)
+		}
+	}
+	bad := []string{"-2", "../x", "a/b", "A2", "a b", "a.b", "a_b"}
+	for _, s := range bad {
+		c := validConfig()
+		c.Instance = s
+		if err := c.Validate(); err == nil {
+			t.Errorf("instance %q: Validate musi odrzucić (ucieczka ścieżki / injection)", s)
+		}
+	}
+}

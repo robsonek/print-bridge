@@ -6,11 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 )
 
+// instanceRe ogranicza slug instancji — leci do ścieżek (/opt/print-bridge-<slug>)
+// i nazwy unitu systemd w update-bridge.sh; bez tego '/' albo '..' = ucieczka
+// ścieżki / wstrzyknięcie do systemctl. Pusty slug (primary) jest dozwolony osobno.
+var instanceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
 type Config struct {
 	ListenPort         int    `json:"listen_port"`
+	Instance           string `json:"instance"` // slug instancji; "" = podstawowa. Steruje ścieżką/nazwą unitu/portem w self-update.
 	PrintToken         string `json:"print_token"`
 	CUPSQueue          string `json:"cups_queue"`
 	PrinterIP          string `json:"printer_ip"`
@@ -113,6 +120,9 @@ func (c Config) Validate() error {
 	}
 	if c.ListenPort < 1 || c.ListenPort > 65535 {
 		return fmt.Errorf("listen_port %d out of range 1-65535", c.ListenPort)
+	}
+	if c.Instance != "" && !instanceRe.MatchString(c.Instance) {
+		return fmt.Errorf("instance %q invalid (expected slug [a-z0-9-], np. \"2\")", c.Instance)
 	}
 	// main.go narrows this to uint8; 256 would wrap to 0 and print blank labels.
 	if c.RenderThreshold < 0 || c.RenderThreshold > 255 {
