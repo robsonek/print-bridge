@@ -77,11 +77,23 @@ na tym samym Debianie — nie potrzeba nowej VM:
 sudo ./install-debian.sh <ip_drukarki_2> <kolejka_cups_2> <egress_cidr> 2 9444
 ```
 
-Slug `2` daje katalog `/opt/print-bridge-2`, usługę `print-bridge-2.service` i
-config z `"instance": "2"`, `"listen_port": 9444`. Self-update przez API
-(`POST /api/v1/admin/update`) trafia wtedy w tę instancję — wspólny root-owny
-`update-bridge.sh` wylicza cel ze slugu z config.json. Instancja podstawowa
-(bez slugu) działa jak dotąd: `/opt/print-bridge`, `print-bridge.service`, 9443.
+Slug `2` (4. arg) daje katalog `/opt/print-bridge-2`, usługę
+`print-bridge-2.service` i config z `"instance": "2"`. Argumenty muszą być
+**rozłączne** względem instancji podstawowej:
+- **`listen_port`** (5. arg) — wymagany dla nazwanej instancji i **≠ 9443**
+  (installer odrzuci kolizję); otwierany w ufw zamiast 9443.
+- **`<kolejka_cups_2>`** (2. arg) — osobna kolejka CUPS; installer tworzy ją
+  `lpdpaced://<ip_drukarki_2>/lp`, więc IP drugiej drukarki jest w niej zaszyte.
+- **`print_token`** — generowany świeżo i wypisany na końcu instalacji (osobny
+  od tokenu instancji 1) — przekaż go orchestratorowi.
+
+Współdzielone (bez duplikacji): root-owny `update-bridge.sh` + drop-in sudoers
++ użytkownik `print-bridge`. Self-update przez API
+(`POST /api/v1/admin/update`) trafia w tę instancję — wspólny updater wylicza
+cel (katalog/usługę/port) ze slugu z config.json. Ręczna aktualizacja nazwanej
+instancji: `sudo update-bridge.sh <tag> 2` (slug jako 2. arg; bez niego
+aktualizuje się instancja podstawowa). Instancja podstawowa (bez slugu) działa
+jak dotąd: `/opt/print-bridge`, `print-bridge.service`, 9443.
 
 Znane środowiskowe: na minimalnym Debianie (bez `colord`) `cups-browsed`
 potrafi ZAWIESIĆ cupsd — synchroniczne wywołania D-Bus `CreateProfile`/
