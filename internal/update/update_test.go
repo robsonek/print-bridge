@@ -44,7 +44,7 @@ func TestSpawnUpdaterRunsViaSudoAndLogs(t *testing.T) {
 	for {
 		b, _ := os.ReadFile(logPath)
 		s := string(b)
-		if strings.Contains(s, "FAKE-SUDO -n /usr/local/sbin/update-bridge.sh v1.2.3") {
+		if strings.Contains(s, "FAKE-SUDO -n /usr/local/sbin/update-bridge.sh v1.2.3\n") {
 			if !strings.Contains(s, "spawn updater tag=v1.2.3") {
 				t.Errorf("log bez nagłówka spawnu: %q", s)
 			}

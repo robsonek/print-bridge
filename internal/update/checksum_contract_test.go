@@ -127,11 +127,12 @@ func TestUpdaterRollbackContract(t *testing.T) {
 	script := string(scriptBytes)
 
 	// 1) Backup before stop (and the backup must be the running binary).
-	// The stop COMMAND is anchored at line start — the cgroup-escape comment
-	// higher up mentions `systemctl stop print-bridge` in prose.
+	// The active stop COMMAND is `systemctl stop "$SERVICE"`, anchored at line
+	// start — the cgroup-escape comment higher up mentions the literal
+	// `systemctl stop print-bridge` in prose, which is why the `^` matters.
 	backupIdx := strings.Index(script, `cp -f "$BIN" "$BAK"`)
 	stopIdx := -1
-	if loc := regexp.MustCompile(`(?m)^systemctl stop print-bridge`).FindStringIndex(script); loc != nil {
+	if loc := regexp.MustCompile(`(?m)^systemctl stop "\$SERVICE"`).FindStringIndex(script); loc != nil {
 		stopIdx = loc[0]
 	}
 	if backupIdx == -1 {

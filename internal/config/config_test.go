@@ -164,7 +164,7 @@ func TestValidateInstanceSlug(t *testing.T) {
 			t.Errorf("instance %q: Validate musi przyjąć, got %v", s, err)
 		}
 	}
-	bad := []string{"-2", "../x", "a/b", "A2", "a b", "a.b", "a_b"}
+	bad := []string{"-2", "../x", "a/b", "A2", "a b", "a.b", "a_b", "a\n", ".."}
 	for _, s := range bad {
 		c := validConfig()
 		c.Instance = s
