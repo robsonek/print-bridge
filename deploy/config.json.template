@@ -1,5 +1,6 @@
 {
   "listen_port": 9443,
+  "instance": "",
   "print_token": "REPLACE_WITH_64_CHAR_TOKEN",
   "cups_queue": "xp423b",
   "printer_ip": "10.0.0.50",
