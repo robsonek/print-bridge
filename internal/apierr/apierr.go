@@ -23,6 +23,14 @@ const (
 	// Wymaga decyzji człowieka (potwierdź/dodrukuj NOWYM kluczem) — celowo
 	// NIE-retryable, żeby automat nie pętlił i nie wymuszał fałszywego printed.
 	CodePrintUnconfirmed Code = "PRINT_UNCONFIRMED"
+	// CodeUpdateFailed (500): aktualizator nie wystartował z winy agenta (log,
+	// blokada, start procesu) — szczegół w details.reason, ścieżki tylko w logu
+	// agenta. NIE-retryable: brak logu czy sudo nie mija sam, decyduje operator.
+	CodeUpdateFailed Code = "UPDATE_FAILED"
+	// CodeUpdateInProgress (409): aktualizacja tej instancji już trwa (lock
+	// update-bridge.sh albo świeży znacznik startu). Operator czeka na koniec
+	// (health.version) i ponawia ręcznie, jeśli trzeba.
+	CodeUpdateInProgress Code = "UPDATE_IN_PROGRESS"
 )
 
 var retryable = map[Code]bool{

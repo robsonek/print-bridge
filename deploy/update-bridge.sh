@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Detached updater, runs as ROOT. Invoked by the agent as:
-#   sudo -n /usr/local/sbin/update-bridge.sh <tag>
+# Detached updater, runs as ROOT. Invoked by the agent (>= v0.8.0) as:
+#   sudo -n /usr/local/sbin/update-bridge.sh <tag> <instance|""> <token>
 # (sudoers drop-in provisioned by install-debian.sh and self-healed below), or
-# manually: sudo update-bridge.sh <tag>.
+# manually: sudo update-bridge.sh <tag> [instance] (bez tokenu).
 # Replaces the binary + CUPS backend, preserves config.json + data/, restarts,
 # verifies /health. The agent appends this script's output to data/update.log.
 TAG="${1:?tag required}"
@@ -12,8 +12,9 @@ TAG="${1:?tag required}"
 # Defense-in-depth: the agent validates the tag, but the sudoers entry also
 # allows DIRECT invocation by the print-bridge user — and the tag is
 # interpolated into the download URL, so it must never contain '/' or '..'.
-if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
-  echo "ERROR: invalid tag ${TAG@Q} (expected semver like v1.2.3)" >&2
+# U5 (od v0.8.0): wymagany wiodący v — tagi wydań to v*, a URL niżej używa ${TAG}.
+if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+  echo "ERROR: invalid tag ${TAG@Q} (expected v-prefixed semver like v1.2.3)" >&2
   exit 1
 fi
 
@@ -23,6 +24,14 @@ INSTANCE="${2:-}"
 # Pusty = instancja podstawowa (zachowanie sprzed wieloinstancyjności).
 if [ -n "$INSTANCE" ] && ! [[ "$INSTANCE" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   echo "ERROR: invalid instance ${INSTANCE@Q} (expected slug [a-z0-9-])" >&2
+  exit 1
+fi
+
+# Token właściciela znacznika startu (U2, od v0.8.0) — podaje go agent; przy
+# ręcznym uruchomieniu (i od agenta < v0.8.0) pusty.
+TOKEN="${3:-}"
+if [ -n "$TOKEN" ] && ! [[ "$TOKEN" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "ERROR: invalid token (expected 32 hex chars)" >&2
   exit 1
 fi
 
@@ -64,9 +73,53 @@ if [ -z "${PB_UPDATE_DETACHED:-}" ] && grep -qsF "${SERVICE}.service" /proc/self
       --property=StandardOutput="append:${LOGFILE}" \
       --property=StandardError="append:${LOGFILE}" \
       --setenv=PB_UPDATE_DETACHED=1 \
-      "$SELF" "$TAG" ${INSTANCE:+"$INSTANCE"}
+      "$SELF" "$TAG" "$INSTANCE" ${TOKEN:+"$TOKEN"}
   fi
   echo "WARNING: brak systemd-run — kontynuuję w cgroupie serwisu (systemctl stop może zabić updater)" >&2
+fi
+
+# U2 (od v0.8.0): jedna aktualizacja instancji naraz. flock na data/update.lock
+# trzymamy przez CAŁY przebieg (FD 9 żyje do exit, także w rollbacku z trapa),
+# więc agent — także po restarcie w trakcie update'u — odpowiada 409
+# UPDATE_IN_PROGRESS. Bierze go dopiero ten etap (re-exec wyżej NIE: systemd-run
+# nie przekazuje FD do transient unitu). Czekamy -w 10, bo agent trzyma ten lock
+# przez sprawdzenie, rezerwację znacznika i spawn (milisekundy). Każda operacja
+# na znaczniku data/update.pending dzieje się pod tym lockiem — tu i w agencie.
+LOCK="$INSTALL_DIR/data/update.lock"
+PENDING="$INSTALL_DIR/data/update.pending"
+# Root otwiera plik w katalogu należącym do print-bridge: symlink albo FIFO
+# (open by zawisł) = odmowa. >> tworzy plik i nigdy go nie obcina.
+if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
+  if [ -L "$LOCK" ] || [ ! -f "$LOCK" ]; then
+    echo "=== $(date -Is) ERROR: ${LOCK} nie jest zwykłym plikiem — przerywam" >&2
+    exit 1
+  fi
+fi
+exec 9>>"$LOCK"
+if ! flock -w 10 9; then
+  echo "=== $(date -Is) ERROR: inna aktualizacja tej instancji w toku — przerywam" >&2
+  exit 1
+fi
+# Zlecenie od agenta: znacznik musi nadal nieść NASZ token. Skrypt opóźniony
+# ponad TTL znacznika, którego start przejął nowszy update, kończy się bez zmian
+# (i nie kasuje cudzego znacznika).
+if [ -n "$TOKEN" ]; then
+  if [ -L "$PENDING" ] || [ ! -f "$PENDING" ] || [ "$(cat "$PENDING")" != "$TOKEN" ]; then
+    echo "=== $(date -Is) ERROR: zlecenie nieaktualne (znacznik startu wygasł albo przejął go nowszy update) — przerywam" >&2
+    exit 1
+  fi
+  rm -f "$PENDING"
+fi
+# Host-wide: instancje dzielą ten skrypt, sudoers i backend lpdpaced — update
+# innej instancji czeka na koniec bieżącego zamiast się z nim ścigać. /run jest
+# roota (0755), lock zawsze brany PO locku instancji (bez zakleszczeń).
+exec 8>>/run/print-bridge-update.lock
+if ! flock -n 8; then
+  echo "=== $(date -Is) czekam na aktualizację innej instancji (do 600 s)"
+  if ! flock -w 600 8; then
+    echo "=== $(date -Is) ERROR: aktualizacja innej instancji trwa ponad 600 s — przerywam bez zmian" >&2
+    exit 1
+  fi
 fi
 
 echo "=== $(date -Is) update-bridge.sh start tag=${TAG} instance=${INSTANCE:-<primary>} arch=${ARCH}"

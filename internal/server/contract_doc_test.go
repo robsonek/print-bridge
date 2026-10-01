@@ -151,18 +151,20 @@ func sortedKeys(m map[string]bool) []string {
 }
 
 // §2.1: zbiór kodów = stałe apierr.go; kolumna Retryable() = Code.Retryable();
-// „retry automatyczny klienta” = każda emisja kodu to 5xx. Jedynym kodem, w
-// którym Retryable() i retry automatyczny się różnią, jest PRINTER_BUSY
-// (409 z resetu — operator ponawia ręcznie); nowy taki kod wymaga świadomej
-// decyzji i wpisu w §3.
+// „retry automatyczny klienta” ⇔ kod ma emisję na print-jobs i każda jego
+// emisja na print-jobs to 5xx (od v0.8.0: mutacje admin nigdy nie są ponawiane
+// automatycznie, więc kod tylko z resetu/update to zawsze „nie”). Jedynym
+// kodem, w którym Retryable() i retry automatyczny się różnią, jest
+// PRINTER_BUSY (409 z resetu — operator ponawia ręcznie); nowy taki kod
+// wymaga świadomej decyzji i wpisu w §3.
 func TestContractDocCodesMatchAPIErr(t *testing.T) {
 	tables := contractDoc(t)["kody"]
 	if len(tables) != 1 {
 		t.Fatalf("oczekiwano jednej tabeli kontrakt:kody, jest %d", len(tables))
 	}
-	statuses := map[string][]int{}
+	statuses := map[string][]int{} // tylko emisje na print-jobs
 	for _, c := range contractCases() {
-		if c.status >= 400 {
+		if c.status >= 400 && contractEndpoints[c.path] == "print-jobs" {
 			code, _ := c.want["code"].(string)
 			statuses[code] = append(statuses[code], c.status)
 		}
@@ -186,7 +188,7 @@ func TestContractDocCodesMatchAPIErr(t *testing.T) {
 			all5xx = all5xx && s >= 500
 		}
 		if auto != all5xx {
-			t.Errorf("%s: retry automatyczny=%v, a emisje mają HTTP %v (retry automatyczny ⇔ 5xx)", code, auto, statuses[code])
+			t.Errorf("%s: retry automatyczny=%v, a emisje na print-jobs mają HTTP %v (retry automatyczny ⇔ emisje na print-jobs i wszystkie 5xx)", code, auto, statuses[code])
 		}
 		if goRetry != auto && code != string(apierr.CodePrinterBusy) {
 			t.Errorf("%s: Retryable()=%v ≠ retry automatyczny=%v — dziś dozwolone tylko dla PRINTER_BUSY", code, goRetry, auto)

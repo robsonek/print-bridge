@@ -14,7 +14,9 @@ func TestRetryableClassification(t *testing.T) {
 			t.Errorf("%s should be retryable", c)
 		}
 	}
-	noRetry := []Code{CodeInvalidPDF, CodeInvalidZPL, CodeUnsupportedFormat, CodeInvalidRequest, CodeMissingToken, CodeForbidden, CodePrintUnconfirmed}
+	// UPDATE_FAILED / UPDATE_IN_PROGRESS (od v0.8.0): mutacje admin — operator
+	// ponawia ręcznie, nigdy automat (docs/error-contract.md §3).
+	noRetry := []Code{CodeInvalidPDF, CodeInvalidZPL, CodeUnsupportedFormat, CodeInvalidRequest, CodeMissingToken, CodeForbidden, CodePrintUnconfirmed, CodeUpdateFailed, CodeUpdateInProgress}
 	for _, c := range noRetry {
 		if c.Retryable() {
 			t.Errorf("%s should NOT be retryable", c)
