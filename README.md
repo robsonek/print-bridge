@@ -10,18 +10,24 @@ przez ZPL `~HS`.
 ## Endpointy
 - `POST /api/v1/print-jobs` — `X-Print-Token` + `Idempotency-Key`; body
   `{label_base64|pdf_base64, copies, format?, external_reference?}`.
-  `status:"printed"` = ostatnia etykieta fizycznie wyszła (drain-poll `~HS`);
+  `status:"printed"` = ostatnia etykieta fizycznie wyszła (drain-poll `~HS`;
+  drukarka bez zrozumiałego `~HS` — best-effort po samym CUPS,
+  `docs/error-contract.md` §4);
   retry z tym samym kluczem wznawia istniejący job (zero duplikatów).
   **Wyjątek:** po faulcie sprzętowym (np. brak papieru) fizyczny wynik joba
   jest nieobserwowalny — retry zwraca `PRINT_UNCONFIRMED` (409, nie-retryable)
   i wymaga decyzji człowieka: potwierdź albo dodrukuj NOWYM kluczem
-  (`docs/error-contract.md`).
+  (`docs/error-contract.md` §4; pełny kontrakt HTTP: kody, `details`, kształty
+  sukcesu — tamże).
 - `GET  /api/v1/health` — drukarka/CUPS/`~HS`: m.in. `head_open`, `paper_out`,
   `paused`, `queued_formats`, `batch_remaining`, `host_status`/`host_status_2`,
-  `watchdog_auto_resets` (200 ok / 503 degraded).
+  `watchdog_auto_resets` (200 ok / 503 degraded; pola: `docs/error-contract.md`
+  §1.2).
 - `POST /api/v1/admin/printer-reset` — „wymieniłem papier — wznów": odwiesza
   latched `Paper Jam` i zawieszony responder 9100 (`function.cgi?func=reset`),
-  zbuforowany job dokańcza się; 409 `PRINTER_BUSY` gdy trwa druk (retryable).
+  zbuforowany job dokańcza się; 409 `PRINTER_BUSY` gdy trwa druk —
+  `Retryable()` w Go, ale klient ponawia RĘCZNIE, po zakończeniu batcha
+  (reset ma skutek fizyczny; `docs/error-contract.md` §3).
 - `POST /api/v1/admin/update` — self-update do tagu release (sudo → transient
   unit systemd; log: `data/update.log`). Od v0.5.3 fail-safe: backup binarki
   przed stopem + trap EXIT przywracający ją i restartujący serwis przy KAŻDEJ
