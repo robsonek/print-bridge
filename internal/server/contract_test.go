@@ -12,12 +12,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -155,28 +157,61 @@ type contractWorld struct {
 	panel      *panelTransport
 	resetProbe *contractBackend
 	resetPoll  time.Duration
-	updater    func(tag string) error
-	spawned    []string
+	// spawner: PRAWDZIWY update.Spawner (lock, znacznik, log) w katalogu
+	// danych z TempDir; za sudo podstawka, która tylko kończy się sukcesem.
+	spawner *update.Spawner
+	updater func(tag string) error
+	held    *os.File // flock „skryptu” trzymany przez przypadek (U2)
 
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func newContractWorld() *contractWorld {
+func newContractWorld(t *testing.T) *contractWorld {
+	t.Helper()
+	dir := t.TempDir()
+	data := filepath.Join(dir, "data")
+	fakeSudo := filepath.Join(dir, "fake-sudo")
+	if err := os.Mkdir(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fakeSudo, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	w := &contractWorld{
 		be:         &contractBackend{states: []int{printer.JobCompleted}, hs: []hsReply{{ok: true}}},
 		store:      newMemStore(),
 		panel:      &panelTransport{status: []panelPage{panelHTML("greentext", "Ready")}},
 		resetProbe: &contractBackend{hs: []hsReply{{ok: true}}},
+		spawner: &update.Spawner{
+			Script:      "/usr/local/sbin/update-bridge.sh",
+			LogPath:     filepath.Join(data, "update.log"),
+			LockPath:    filepath.Join(data, "update.lock"),
+			PendingPath: filepath.Join(data, "update.pending"),
+			Sudo:        fakeSudo,
+		},
 	}
-	// Domyślnie aktualizator „startuje” (prawdziwy SpawnUpdater wołałby sudo);
-	// przypadki 422 podmieniają go na prawdziwy update.SpawnUpdater.
-	w.updater = func(tag string) error {
-		w.spawned = append(w.spawned, tag)
-		return nil
-	}
+	w.updater = func(tag string) error { return w.spawner.Start(tag) }
 	w.ctx, w.cancel = context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		w.cancel()
+		if w.held != nil {
+			w.held.Close()
+		}
+	})
 	return w
+}
+
+// holdScriptLock: flock z osobnego opisu pliku — tak trzyma go update-bridge.sh.
+func (w *contractWorld) holdScriptLock() {
+	f, err := os.OpenFile(w.spawner.LockPath, os.O_RDONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		panic(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		panic(err)
+	}
+	w.held = f
 }
 
 func (w *contractWorld) router() http.Handler {
@@ -199,17 +234,9 @@ func (w *contractWorld) router() http.Handler {
 		Resetter:       rs.Reset,
 		Updater:        func(tag string) error { return w.updater(tag) },
 		ConfirmTimeout: 90 * time.Second,
+		ResetTimeout:   80 * time.Second,
 	}
 	return Router(h, contractToken)
-}
-
-// realSpawnUpdater: produkcyjny update.SpawnUpdater. logPath w nieistniejącym
-// katalogu — jeśli walidacja przejdzie, SpawnUpdater pada na otwarciu logu
-// (update.go), zanim cokolwiek uruchomi.
-func realSpawnUpdater(w *contractWorld) {
-	w.updater = func(tag string) error {
-		return update.SpawnUpdater("/nonexistent/update-bridge.sh", "/nonexistent/data/update.log", tag, "")
-	}
 }
 
 type contractCase struct {
@@ -266,6 +293,14 @@ func envelopeDetails(code, msg string, details map[string]any) map[string]any {
 	return m
 }
 
+// updateFailedMsg: stałe teksty UPDATE_FAILED per details.reason — bez ścieżek
+// i bez err.Error() (szczegół tylko w logu agenta).
+var updateFailedMsg = map[string]string{
+	"log_unavailable":  "nie można otworzyć logu aktualizatora — aktualizacja nie wystartowała (szczegóły w logu agenta)",
+	"lock_unavailable": "nie można sprawdzić blokady aktualizacji — aktualizacja nie wystartowała (szczegóły w logu agenta)",
+	"spawn_failed":     "nie można uruchomić aktualizatora — aktualizacja nie wystartowała (szczegóły w logu agenta)",
+}
+
 func with(c contractCase, f func(*contractCase)) contractCase {
 	f(&c)
 	return c
@@ -277,7 +312,8 @@ func with(c contractCase, f func(*contractCase)) contractCase {
 func contractCases() []contractCase {
 	const (
 		unconfirmedMsg = "job przerwany faultem sprzętowym — fizyczny wynik niepotwierdzalny; potwierdź wydruk albo dodrukuj nowym Idempotency-Key"
-		badTagMsg      = "invalid release tag (expected semver like v1.2.3)"
+		badTagMsg      = "invalid release tag (expected v-prefixed semver like v1.2.3)"
+		inProgressMsg  = "aktualizacja agenta już trwa (albo właśnie startuje) — poczekaj na jej koniec (health.version) i ponów ręcznie, jeśli trzeba"
 	)
 	printed := map[string]any{"status": "printed", "cups_job_id": "7"}
 	cs := []contractCase{
@@ -500,29 +536,47 @@ func contractCases() []contractCase {
 				map[string]any{"panel_state": ""})
 		}),
 
-		// --- printer-reset: PRINT_TIMEOUT 503 (klient rozłączył się w trakcie) ---
+		// --- printer-reset: PRINT_TIMEOUT 503 z details.reset_sent (od v0.8.0) ---
 		with(resetCase("reset-kontekst-anulowany"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) {
 				w.resetPoll = time.Hour // select wybierze anulowany kontekst, nie timer
 				w.panel.onReset = w.cancel
 			}
-			c.status, c.want = 503, envelope("PRINT_TIMEOUT", "context canceled while waiting for panel")
+			c.status, c.want = 503, envelopeDetails("PRINT_TIMEOUT",
+				"klient rozłączył się — func=reset mógł zostać wykonany, a panel nie potwierdził Ready — sprawdź panel przed ponowieniem",
+				map[string]any{"reset_sent": true})
 		}),
-
-		// --- update: sukces 202 ---
-		with(updateCase("update-tag-z-v", `{"tag":"v1.2.3"}`), func(c *contractCase) {
-			c.status, c.want = 202, map[string]any{"status": "updating", "tag": "v1.2.3"}
+		with(resetCase("reset-budzet-wyczerpany"), func(c *contractCase) {
+			// U3: budżet czasu resetu minął (tu: już przed startem) — koperta
+			// zamiast odpowiedzi niezapisywalnej po WriteTimeout.
+			c.arrange = func(w *contractWorld) {
+				w.cancel()
+				w.ctx, w.cancel = context.WithDeadline(context.Background(), time.Unix(0, 0))
+			}
+			c.status, c.want = 503, envelopeDetails("PRINT_TIMEOUT",
+				"budżet czasu resetu wyczerpany — func=reset NIE został wysłany",
+				map[string]any{"reset_sent": false})
 			c.check = func(t *testing.T, w *contractWorld) {
-				if !reflect.DeepEqual(w.spawned, []string{"v1.2.3"}) {
-					t.Errorf("aktualizator dostał %q, want [v1.2.3]", w.spawned)
+				if w.panel.resets != 0 {
+					t.Errorf("func=reset wysłany mimo wyczerpanego budżetu (%d)", w.panel.resets)
 				}
 			}
 		}),
-		with(updateCase("update-tag-bez-v-echo", `{"tag":"1.2.3"}`), func(c *contractCase) {
-			c.status, c.want = 202, map[string]any{"status": "updating", "tag": "1.2.3"}
+
+		// --- update: sukces 202 (prawdziwy update.Spawner) ---
+		with(updateCase("update-tag-z-v", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			c.status, c.want = 202, map[string]any{"status": "updating", "tag": "v1.2.3"}
+			c.check = func(t *testing.T, w *contractWorld) {
+				if b, _ := os.ReadFile(w.spawner.LogPath); !strings.Contains(string(b), "spawn updater tag=v1.2.3") {
+					t.Errorf("aktualizator nie wystartował: log=%q", b)
+				}
+				if _, err := os.Stat(w.spawner.PendingPath); err != nil {
+					t.Errorf("brak znacznika startu: %v", err)
+				}
+			}
 		}),
 
-		// --- update: INVALID_REQUEST 400 i 422 ---
+		// --- update: INVALID_REQUEST 400 i 422 (błędy wejścia) ---
 		with(updateCase("update-puste-body", ``), func(c *contractCase) {
 			c.status, c.want = 400, envelope("INVALID_REQUEST", "invalid JSON")
 		}),
@@ -530,18 +584,66 @@ func contractCases() []contractCase {
 			c.status, c.want = 400, envelope("INVALID_REQUEST", "invalid JSON")
 		}),
 		with(updateCase("update-zly-tag", `{"tag":"latest"}`), func(c *contractCase) {
-			c.arrange = realSpawnUpdater
 			c.status, c.want = 422, envelope("INVALID_REQUEST", badTagMsg)
 		}),
 		with(updateCase("update-brak-tagu", `{}`), func(c *contractCase) {
-			c.arrange = realSpawnUpdater
 			c.status, c.want = 422, envelope("INVALID_REQUEST", badTagMsg)
 		}),
+		with(updateCase("update-tag-bez-v", `{"tag":"1.2.3"}`), func(c *contractCase) {
+			// U5 (od v0.8.0): do v0.7.0 → 202, a pobranie padało asynchronicznie
+			c.status, c.want = 422, envelope("INVALID_REQUEST", badTagMsg)
+		}),
+		with(updateCase("update-zla-instancja", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			// nieosiągalne w produkcji (config.go waliduje slug na starcie)
+			c.arrange = func(w *contractWorld) { w.spawner.Instance = "../x" }
+			c.status, c.want = 422, envelope("INVALID_REQUEST", "invalid instance (expected slug [a-z0-9-])")
+		}),
+
+		// --- update: UPDATE_FAILED 500 (błąd po stronie agenta, od v0.8.0) ---
 		with(updateCase("update-blad-logu-aktualizatora", `{"tag":"v1.2.3"}`), func(c *contractCase) {
-			// błąd po stronie agenta też wychodzi jako 422 INVALID_REQUEST
-			c.arrange = realSpawnUpdater
-			c.status, c.want = 422, envelope("INVALID_REQUEST",
-				"updater log /nonexistent/data/update.log: open /nonexistent/data/update.log: no such file or directory")
+			// do v0.7.0: 422 INVALID_REQUEST ze ścieżką instalacji w message
+			c.arrange = func(w *contractWorld) { w.spawner.LogPath = "/nonexistent/data/update.log" }
+			c.status, c.want = 500, envelopeDetails("UPDATE_FAILED", updateFailedMsg["log_unavailable"],
+				map[string]any{"reason": "log_unavailable"})
+		}),
+		with(updateCase("update-blokada-niedostepna", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			c.arrange = func(w *contractWorld) {
+				w.spawner.LockPath, w.spawner.PendingPath = "/nonexistent/data/update.lock", "/nonexistent/data/update.pending"
+			}
+			c.status, c.want = 500, envelopeDetails("UPDATE_FAILED", updateFailedMsg["lock_unavailable"],
+				map[string]any{"reason": "lock_unavailable"})
+		}),
+		with(updateCase("update-sudo-nie-startuje", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			c.arrange = func(w *contractWorld) { w.spawner.Sudo = "/nonexistent/sudo" }
+			c.status, c.want = 500, envelopeDetails("UPDATE_FAILED", updateFailedMsg["spawn_failed"],
+				map[string]any{"reason": "spawn_failed"})
+		}),
+		with(updateCase("update-nieznany-blad", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			// nieznany błąd Updatera: klasa „agent”, message bez err.Error()
+			c.arrange = func(w *contractWorld) {
+				w.updater = func(string) error { return errors.New("boom: /opt/print-bridge/data") }
+			}
+			c.status, c.want = 500, envelopeDetails("UPDATE_FAILED", updateFailedMsg["spawn_failed"],
+				map[string]any{"reason": "spawn_failed"})
+		}),
+
+		// --- update: UPDATE_IN_PROGRESS 409 (od v0.8.0) ---
+		with(updateCase("update-w-toku-lock-skryptu", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			c.arrange = func(w *contractWorld) { w.holdScriptLock() }
+			c.status, c.want = 409, envelope("UPDATE_IN_PROGRESS", inProgressMsg)
+		}),
+		with(updateCase("update-w-toku-swiezy-znacznik", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			c.arrange = func(w *contractWorld) {
+				if err := os.WriteFile(w.spawner.PendingPath, []byte("0123456789abcdef0123456789abcdef"), 0o644); err != nil {
+					panic(err)
+				}
+			}
+			c.status, c.want = 409, envelope("UPDATE_IN_PROGRESS", inProgressMsg)
+		}),
+		with(updateCase("update-drugi-zaraz-po-pierwszym", `{"tag":"v1.2.3"}`), func(c *contractCase) {
+			// pierwszy 202 zostawia znacznik, skrypt (podstawka) nie bierze locka
+			c.retry = true
+			c.status, c.want = 409, envelope("UPDATE_IN_PROGRESS", inProgressMsg)
 		}),
 	}
 
@@ -575,8 +677,8 @@ func (w *contractWorld) do(h http.Handler, c contractCase) *httptest.ResponseRec
 	return rec
 }
 
-func runContractCase(c contractCase) (*httptest.ResponseRecorder, *contractWorld) {
-	w := newContractWorld()
+func runContractCase(t *testing.T, c contractCase) (*httptest.ResponseRecorder, *contractWorld) {
+	w := newContractWorld(t)
 	if c.arrange != nil {
 		c.arrange(w)
 	}
@@ -663,7 +765,7 @@ func TestContractGolden(t *testing.T) {
 	}
 	for _, c := range contractCases() {
 		t.Run(contractEndpoints[c.path]+"/"+c.name, func(t *testing.T) {
-			rec, w := runContractCase(c)
+			rec, w := runContractCase(t, c)
 			raw := rec.Body.Bytes()
 			if rec.Code != c.status {
 				t.Fatalf("HTTP %d, want %d; body=%s", rec.Code, c.status, raw)
@@ -753,7 +855,7 @@ func TestContractNonEnvelopeResponses(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			w := newContractWorld()
+			w := newContractWorld(t)
 			rec := w.do(w.router(), contractCase{method: c.method, path: c.path, token: c.token, key: "pj:n", body: labelBody(zpl)})
 			if rec.Code != c.status {
 				t.Fatalf("HTTP %d, want %d; body=%q", rec.Code, c.status, rec.Body.String())
@@ -782,7 +884,7 @@ func TestContractNonEnvelopeResponses(t *testing.T) {
 	// N1b: auth działa przed routingiem — nieznana ścieżka bez tokenu to
 	// koperta 401, nie 404.
 	t.Run("N1b nieznana sciezka bez tokenu", func(t *testing.T) {
-		w := newContractWorld()
+		w := newContractWorld(t)
 		rec := w.do(w.router(), contractCase{method: "POST", path: "/api/v1/nope"})
 		if rec.Code != 401 || rec.Header().Get("Content-Type") != "application/json" {
 			t.Fatalf("HTTP %d %q, want 401 application/json", rec.Code, rec.Header().Get("Content-Type"))

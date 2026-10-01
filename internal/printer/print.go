@@ -171,6 +171,11 @@ func (p *Printer) verify(ctx context.Context, jobID, budget int) (Result, *apier
 			// MED #10 closed: head/cover open lives in ~HS string 2 and used to
 			// be invisible (false "printed" with the head physically open).
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline, "printer head/cover open (~HS)", 503)
+		// Bezpiecznik (U4): dziś nieosiągalny — Healthy() = !PaperOut && !Paused
+		// && !HeadOpen, a każde z nich ma case wyżej. Zostaje, bo gwarantuje
+		// inwariant „verify() nigdy nie zwraca printed, gdy Healthy()==false”,
+		// gdyby Healthy() dostało nowy fault bez własnego case'a (wtedy
+		// TestVerifyEveryHealthyFaultHasDedicatedCase każe ten case dopisać).
 		case !hs.Healthy():
 			return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline, "printer fault (~HS): "+hs.Raw, 503)
 

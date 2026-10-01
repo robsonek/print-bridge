@@ -27,14 +27,21 @@ przez ZPL `~HS`.
   latched `Paper Jam` i zawieszony responder 9100 (`function.cgi?func=reset`),
   zbuforowany job dokańcza się; 409 `PRINTER_BUSY` gdy trwa druk —
   `Retryable()` w Go, ale klient ponawia RĘCZNIE, po zakończeniu batcha
-  (reset ma skutek fizyczny; `docs/error-contract.md` §3).
+  (reset ma skutek fizyczny; `docs/error-contract.md` §3). Od v0.8.0 reset ma
+  budżet czasu (domyślnie 80 s, poniżej `WriteTimeout`): po nim 503
+  `PRINT_TIMEOUT` z `details.reset_sent` zamiast zerwanego połączenia.
 - `POST /api/v1/admin/update` — self-update do tagu release (sudo → transient
   unit systemd; log: `data/update.log`). Od v0.5.3 fail-safe: backup binarki
   przed stopem + trap EXIT przywracający ją i restartujący serwis przy KAŻDEJ
   porażce po stopie (nieudany install, binarka padająca na starcie — fast-fail
   na `systemctl is-failed` — albo timeout weryfikacji); od v0.5.4 weryfikacja
   `/health` czyta pole `"version"` także przy 503 degraded (drukarka offline
-  w oknie update'u nie cofa dobrej binarki).
+  w oknie update'u nie cofa dobrej binarki). Od v0.8.0: tag tylko z `v`
+  (`0.7.0` → 422), jedna aktualizacja instancji naraz (lock
+  `data/update.lock` trzymany przez updater → 409 `UPDATE_IN_PROGRESS`, także
+  po restarcie agenta; update innej instancji czeka na lock hosta), a błąd
+  startu updatera po stronie agenta → 500 `UPDATE_FAILED` z `details.reason`
+  (`docs/error-contract.md` §1.4, §2.3).
 
 ## Specyfika sprzętu (XP-423B, zmierzone na żywo)
 - Print-server (10/100, Ethernut) gubi pakiety przy wysyłce >40-60 KB/s z GbE

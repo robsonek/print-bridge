@@ -87,6 +87,16 @@ func main() {
 		Interval: time.Minute, FailThreshold: 3, MinGap: 15 * time.Minute,
 	}
 
+	// U2 (od v0.8.0): lock i znacznik startu w katalogu danych TEJ instancji —
+	// update-bridge.sh używa tych samych ścieżek (update.LockFile/PendingFile).
+	updater := &update.Spawner{
+		Script:      updaterScript(exeDir),
+		LogPath:     absUnder(exeDir, "data/update.log"),
+		LockPath:    absUnder(exeDir, update.LockFile),
+		PendingPath: absUnder(exeDir, update.PendingFile),
+		Instance:    cfg.Instance,
+	}
+
 	h := &server.Handlers{
 		Printer:  p,
 		Store:    server.NewStoreAdapter(store),
@@ -94,10 +104,8 @@ func main() {
 		Health:   makeHealth(reach, probe, cups, watchdog.Stats),
 		Resetter: resetter.Reset,
 		Updater: func(tag string) error {
-			script := updaterScript(exeDir)
-			logPath := absUnder(exeDir, "data/update.log")
-			log.Printf("admin/update: spawning updater tag=%s instance=%q script=%s log=%s", tag, cfg.Instance, script, logPath)
-			return update.SpawnUpdater(script, logPath, tag, cfg.Instance)
+			log.Printf("admin/update: spawning updater tag=%s instance=%q script=%s log=%s", tag, cfg.Instance, updater.Script, updater.LogPath)
+			return updater.Start(tag)
 		},
 		// #27: server-side upper bound for the whole print op (exec lp + every
 		// JobState IPP round-trip + verify), so a hung cupsd `lp` held open by a
@@ -107,6 +115,9 @@ func main() {
 		// while still exceeding the healthy poll loop's nominal ConfirmTimeoutSec
 		// (×1s PollInterval) budget so a slow-but-healthy print is never cut off.
 		ConfirmTimeout: time.Duration(cfg.ConfirmTimeoutSec+55) * time.Second,
+		// U3 (od v0.8.0): reset bez budżetu potrafił trwać ~176 s, dłużej niż
+		// WriteTimeout — patrz resetBudget.
+		ResetTimeout: resetBudget(cfg.ConfirmTimeoutSec),
 	}
 
 	srv := &http.Server{
@@ -120,7 +131,7 @@ func main() {
 		// WriteTimeout MUST exceed the print confirm budget: PrintJobs long-polls up
 		// to ConfirmTimeoutSec (x 1s PollInterval). +60s slack covers render/submit/
 		// verify around the loop so a legitimate long print is never cut off.
-		WriteTimeout: time.Duration(cfg.ConfirmTimeoutSec+60) * time.Second,
+		WriteTimeout: writeTimeout(cfg.ConfirmTimeoutSec),
 	}
 
 	// #8: graceful shutdown. The agent is restarted via SIGTERM (systemctl stop /
@@ -167,6 +178,21 @@ func main() {
 type reachabilityProbe interface {
 	Reachable(context.Context) (bool, error)
 }
+
+// writeTimeout serwera HTTP — uzasadnienie przy http.Server w main().
+func writeTimeout(confirmTimeoutSec int) time.Duration {
+	return time.Duration(confirmTimeoutSec+60) * time.Second
+}
+
+// resetBudget (U3, od v0.8.0): budżet resetu drukarki = min(WriteTimeout − 10 s,
+// 100 s). Najdłuższe przekroczenie budżetu to dokończenie sondy ~HS po Ready
+// (ctx działa tylko przy dial, odczyt ≤ ~5,3 s), więc margines 10 s wystarcza,
+// by koperta wyszła przed WriteTimeout. Sufit 100 s trzyma reset poniżej
+// domyślnego client_timeout klienta (120 s).
+func resetBudget(confirmTimeoutSec int) time.Duration {
+	return min(writeTimeout(confirmTimeoutSec)-10*time.Second, 100*time.Second)
+}
+
 type hostStatusProbe interface {
 	HostStatus(context.Context) (printer.HostStatus, bool, error)
 }

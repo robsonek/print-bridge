@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/robsonek/print-bridge/internal/apierr"
 	"github.com/robsonek/print-bridge/internal/printer"
+	"github.com/robsonek/print-bridge/internal/update"
 )
 
 // StoreRecord mirrors idempotency.Record without importing it (decoupling for tests).
@@ -52,6 +54,14 @@ type Handlers struct {
 	// (~ConfirmTimeoutPolls × (ippTimeout + PollInterval)) so a slow-but-healthy
 	// print is never cut off into a false PRINT_TIMEOUT; main sizes it accordingly.
 	ConfirmTimeout time.Duration
+
+	// ResetTimeout (U3, od v0.8.0): budżet całego resetu drukarki. Musi być
+	// mniejszy niż WriteTimeout serwera (z zapasem na dokończenie sondy ~HS),
+	// inaczej odpowiedź nie da się już zapisać, klient dostaje zerwane
+	// połączenie i — przy retry na ConnectionException — wysyła func=reset
+	// ponownie. Po budżecie Resetter zwraca 503 PRINT_TIMEOUT z
+	// details.reset_sent. 0 = bez budżetu (tylko kontekst żądania).
+	ResetTimeout time.Duration
 }
 
 // printContext derives a child of the request context bounded by ConfirmTimeout
@@ -224,7 +234,12 @@ type updateRequest struct {
 // the Laravel UI / support: clears latched faults (Paper Jam) and a wedged
 // 9100 responder; a buffered pending job resumes after the reset.
 func (h *Handlers) AdminPrinterReset(w http.ResponseWriter, r *http.Request) {
-	out, e := h.Resetter(r.Context())
+	ctx, cancel := context.WithCancel(r.Context())
+	if h.ResetTimeout > 0 {
+		ctx, cancel = context.WithTimeout(r.Context(), h.ResetTimeout)
+	}
+	defer cancel()
+	out, e := h.Resetter(ctx)
 	if e != nil {
 		writeError(w, e)
 		return
@@ -245,8 +260,41 @@ func (h *Handlers) AdminUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Updater(req.Tag); err != nil {
-		writeError(w, apierr.New(apierr.CodeInvalidRequest, err.Error(), http.StatusUnprocessableEntity))
+		writeError(w, updateError(err))
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "updating", "tag": req.Tag})
+}
+
+// updateFailedMessages: stałe teksty UPDATE_FAILED per details.reason. Do
+// v0.7.0 błąd agenta szedł jako 422 INVALID_REQUEST z err.Error() — z lokalną
+// ścieżką instalacji w message. Szczegół trafia teraz tylko do logu agenta.
+var updateFailedMessages = map[string]string{
+	update.ReasonLogUnavailable:  "nie można otworzyć logu aktualizatora — aktualizacja nie wystartowała (szczegóły w logu agenta)",
+	update.ReasonLockUnavailable: "nie można sprawdzić blokady aktualizacji — aktualizacja nie wystartowała (szczegóły w logu agenta)",
+	update.ReasonSpawnFailed:     "nie można uruchomić aktualizatora — aktualizacja nie wystartowała (szczegóły w logu agenta)",
+}
+
+// updateError mapuje błąd Updatera na kopertę (U1/U2/U5, od v0.8.0): błąd
+// wejścia → 422 INVALID_REQUEST, aktualizacja w toku → 409 UPDATE_IN_PROGRESS,
+// wszystko inne (także nieznany błąd) → 500 UPDATE_FAILED z details.reason.
+func updateError(err error) *apierr.Error {
+	switch {
+	case errors.Is(err, update.ErrInvalidTag), errors.Is(err, update.ErrInvalidInstance):
+		return apierr.New(apierr.CodeInvalidRequest, err.Error(), http.StatusUnprocessableEntity)
+	case errors.Is(err, update.ErrInProgress):
+		return apierr.New(apierr.CodeUpdateInProgress,
+			"aktualizacja agenta już trwa (albo właśnie startuje) — poczekaj na jej koniec (health.version) i ponów ręcznie, jeśli trzeba",
+			http.StatusConflict)
+	}
+	reason := update.ReasonSpawnFailed
+	var se *update.StartError
+	if errors.As(err, &se) {
+		if _, known := updateFailedMessages[se.Reason]; known {
+			reason = se.Reason
+		}
+	}
+	log.Printf("admin/update: updater not started (reason=%s): %v", reason, err)
+	return apierr.New(apierr.CodeUpdateFailed, updateFailedMessages[reason], http.StatusInternalServerError).
+		WithDetail("reason", reason)
 }

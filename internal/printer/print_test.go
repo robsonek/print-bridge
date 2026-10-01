@@ -3,6 +3,8 @@ package printer
 import (
 	"context"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/robsonek/print-bridge/internal/apierr"
@@ -512,5 +514,67 @@ func TestVerifyIgnoresMediaOdometerInBatchField(t *testing.T) {
 	}
 	if res.Status != "printed" || f.hsCalls != 1 {
 		t.Errorf("want printed after 1 probe, got %+v after %d probes", res, f.hsCalls)
+	}
+}
+
+// U4: bezpiecznik `case !hs.Healthy()` w verify() jest dziś nieosiągalny, ale
+// pilnuje inwariantu „verify() nigdy nie zwraca printed, gdy Healthy()==false”.
+// Każda kombinacja faultów ~HS → błąd z kolejności case'ów, nigdy printed.
+func TestVerifyUnhealthyCombinationsNeverPrinted(t *testing.T) {
+	for mask := 1; mask < 8; mask++ {
+		hs := HostStatus{PaperOut: mask&1 != 0, Paused: mask&2 != 0, HeadOpen: mask&4 != 0}
+		want := apierr.CodePrinterOffline
+		switch {
+		case hs.PaperOut:
+			want = apierr.CodeOutOfPaper
+		case hs.Paused:
+			want = apierr.CodeQueuePaused
+		}
+		res, e := newPrinter(&fakeBackend{reachable: true, states: []int{JobCompleted}, hs: hs, hsOK: true}).
+			Print(context.Background(), []byte("^XA^XZ"), 1)
+		if e == nil || e.Code != want || res.Status == "printed" {
+			t.Errorf("%+v: res=%+v e=%v, want %s", hs, res, e, want)
+		}
+	}
+}
+
+// U4: strażnik pola. Dla każdego pola HostStatus ustawionego osobno na wartość
+// „niezerową”: jeśli Healthy() się psuje, verify() musi odpowiedzieć błędem z
+// DEDYKOWANEGO case'a, nie z bezpiecznika. Dopisanie faultu do Healthy() bez
+// własnego case'a w verify() czerwieni ten test (bezpiecznik dalej chroni
+// produkcję przed fałszywym printed).
+func TestVerifyEveryHealthyFaultHasDedicatedCase(t *testing.T) {
+	typ := reflect.TypeOf(HostStatus{})
+	unhealthy := 0
+	for i := 0; i < typ.NumField(); i++ {
+		var candidates []any
+		switch typ.Field(i).Type.Kind() {
+		case reflect.Bool:
+			candidates = []any{true}
+		case reflect.Int:
+			candidates = []any{1, 1 << 30}
+		case reflect.String:
+			candidates = []any{"x"}
+		default:
+			t.Fatalf("pole %s: typ %s nieobsłużony przez strażnika — dopisz kandydatów", typ.Field(i).Name, typ.Field(i).Type)
+		}
+		for _, v := range candidates {
+			var hs HostStatus
+			reflect.ValueOf(&hs).Elem().Field(i).Set(reflect.ValueOf(v))
+			if hs.Healthy() {
+				continue
+			}
+			unhealthy++
+			_, e := newPrinter(&fakeBackend{reachable: true, states: []int{JobCompleted}, hs: hs, hsOK: true}).
+				Print(context.Background(), []byte("^XA^XZ"), 1)
+			if e == nil {
+				t.Errorf("%s=%v: Healthy()==false, a verify() zwróciło printed", typ.Field(i).Name, v)
+			} else if strings.HasPrefix(e.Message, "printer fault (~HS): ") {
+				t.Errorf("%s=%v: obsłużone przez bezpiecznik — dodaj dedykowany case w verify()", typ.Field(i).Name, v)
+			}
+		}
+	}
+	if unhealthy < 3 {
+		t.Errorf("strażnik znalazł %d faultów, want ≥ 3 (PaperOut, Paused, HeadOpen)", unhealthy)
 	}
 }

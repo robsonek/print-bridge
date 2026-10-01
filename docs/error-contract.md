@@ -1,10 +1,11 @@
 # Kontrakt HTTP print-bridge (v2)
 
-Opisuje to, co agent **v0.7.0** faktycznie wysyła na drucie. Kontrakt na drucie
-jest identyczny od **v0.4.1** (w `v0.4.1..v0.7.0` nie zmieniła się żadna emisja
-`apierr.New`/`WithDetail`, żaden kształt sukcesu ani tag JSON). Kolumna „Od
-wersji” mówi, od którego wydania obowiązuje dany element (`git tag --contains`
-commitu, który go wprowadził).
+Opisuje to, co agent **v0.8.0** wysyła na drucie. Kontrakt był identyczny od
+**v0.4.1** do **v0.7.0** (w `v0.4.1..v0.7.0` nie zmieniła się żadna emisja
+`apierr.New`/`WithDetail`, żaden kształt sukcesu ani tag JSON); v0.8.0 zmienia
+odpowiedzi `update` i `printer-reset` — każda zmiana jest oznaczona „od v0.8.0”,
+a lista jest w §7. Kolumna „Od wersji” mówi, od którego wydania obowiązuje dany
+element (`git tag --contains` commitu, który go wprowadził).
 
 Dokument jest przypięty testami (§8): zbiór kodów, retryowalność, mapa kod →
 endpoint → HTTP → `details`, pola sukcesu i pola health są porównywane z kodem.
@@ -107,9 +108,16 @@ ldflags. Zwarty zapis `"version":"X.Y.Z"` jest częścią kontraktu:
 | `hs_ok` | boolean | — | best-effort ~HS po resecie; `false` NIE unieważnia resetu |
 
 200 znaczy: `func=reset` wykonany, a panel wrócił do `Ready`. Reset ma skutek
-fizyczny (restart print-servera). Typowo trwa ok. 30 s. Endpoint nie ma
-własnego limitu czasu — w patologicznym przypadku może przekroczyć
-`WriteTimeout` serwera i klient dostaje zerwane połączenie (§5, N7).
+fizyczny (restart print-servera). Typowo trwa kilka–kilkanaście sekund.
+
+**Budżet czasu (od v0.8.0):** `min(WriteTimeout − 10 s, 100 s)`, czyli domyślnie
+80 s (`WriteTimeout` = `confirm_timeout_sec` + 60 s). Gdy minie, zanim panel
+rozstrzygnie wynik, odpowiedź to 503 `PRINT_TIMEOUT` z `details.reset_sent`
+(§2.3) — zamiast odpowiedzi niezapisywalnej po `WriteTimeout`. Stan panelu,
+który rozstrzyga wynik (`Printing` przed resetem → 409, `Ready` → 200, fault po
+resecie → 503 `PRINTER_OFFLINE`), wygrywa z budżetem, nawet odebrany tuż po
+jego końcu. Do v0.7.0 reset nie miał limitu i mógł przekroczyć `WriteTimeout`
+(§5, N7).
 
 ### 1.4 `update` → 202
 
@@ -117,13 +125,21 @@ własnego limitu czasu — w patologicznym przypadku może przekroczyć
 | Pole | Typ JSON | Stała | Inwariant |
 |------|----------|-------|-----------|
 | `status` | string | `"updating"` | |
-| `tag` | string | — | echo pola `tag` z żądania, **bez normalizacji** (z `v` albo bez) |
+| `tag` | string | — | echo pola `tag` z żądania, bez normalizacji; od v0.8.0 zawsze zaczyna się od `v` |
 
 202 znaczy tylko „proces aktualizatora wystartował”, NIE „aktualizacja się
 udała”. Wynik weryfikuje się przez `health.version` (aktualizator sam cofa
-binarkę, gdy weryfikacja się nie powiedzie). Tag podawaj **z `v`**: `0.7.0`
-przejdzie walidację (202), ale pobranie wydania padnie asynchronicznie
-(tagi wydań to `v*`).
+binarkę, gdy weryfikacja się nie powiedzie).
+
+- **Tag z `v` (od v0.8.0):** `0.7.0` daje 422 `INVALID_REQUEST` przed startem
+  aktualizatora. Do v0.7.0 przechodził walidację (202), a pobranie wydania
+  padało asynchronicznie (tagi wydań to `v*`).
+- **Jedna aktualizacja naraz (od v0.8.0):** gdy aktualizacja tej instancji trwa
+  albo właśnie startuje — także po restarcie agenta w jej trakcie — odpowiedź
+  to 409 `UPDATE_IN_PROGRESS`. Aktualizacja **innej** instancji na tym samym
+  hoście dostaje 202, a aktualizator czeka (do 600 s) na zakończenie bieżącej,
+  bo instancje dzielą skrypt aktualizatora, sudoers i backend `lpdpaced`.
+  Ochrona działa od aktualizacji uruchamianej przez agenta ≥ v0.8.0.
 
 ## 2. Koperta błędu
 
@@ -136,8 +152,8 @@ Inwarianty:
 - `code` — string, zawsze jedna ze stałych z `internal/apierr/apierr.go`
   (zamknięty zbiór §2.1, nigdy pusty).
 - `message` — string, niepusty tekst dla człowieka. **Nie do parsowania**: treść
-  może się zmieniać i bywa techniczna (przy 422 na `update` zawiera np. lokalną
-  ścieżkę instalacji).
+  może się zmieniać i bywa techniczna. Od v0.8.0 odpowiedzi `update` nie
+  zawierają ścieżek lokalnych (do v0.7.0 422 na `update` potrafił je zawierać).
 - `details` — **albo nieobecne, albo niepusty obiekt** (nigdy `{}` ani `null`).
   Klucze i typy per kod: §2.3.
 - Innych kluczy nie ma (status HTTP nie jest serializowany do body).
@@ -164,9 +180,13 @@ klasyfikuje po klasie HTTP — §6.
 | `FORBIDDEN` | nie | nie | zły `X-Print-Token` |
 | `PRINTER_BUSY` | tak | **nie — ponów ręcznie** | reset odrzucony, bo trwa druk |
 | `PRINT_UNCONFIRMED` | nie | **nie — decyzja człowieka** | wynik fizyczny po faulcie niepoznawalny (§4) |
+| `UPDATE_FAILED` | nie | **nie — ponów ręcznie** | od v0.8.0: aktualizator nie wystartował z winy agenta (`details.reason`) |
+| `UPDATE_IN_PROGRESS` | nie | **nie — ponów ręcznie** | od v0.8.0: aktualizacja tej instancji już trwa albo właśnie startuje |
 
 `Retryable()` to klasyfikacja wewnątrz Go — **nie trafia na drut**. Klient
-decyduje o automatycznym retry po klasie HTTP (§3).
+decyduje o automatycznym retry po klasie HTTP, i tylko na `print-jobs` (§3).
+Kod emitowany wyłącznie przez mutacje admin (`printer-reset`, `update`) ma
+zawsze „nie — ponów ręcznie”.
 
 ### 2.2 Mapa emisji: kod → endpoint → HTTP → `details`
 
@@ -178,7 +198,9 @@ przyjść z kilku endpointów, z różnym HTTP i raz z `details`, raz bez.
 |-----|----------|------|-----------|-----------|-------|
 | `INVALID_REQUEST` | print-jobs | 400 | — | v0.1.0 | brak `Idempotency-Key`; body nie jest JSON-em albo > 20 MB; brak/zły base64 |
 | `INVALID_REQUEST` | update | 400 | — | v0.1.0 | body nie jest JSON-em (także puste) |
-| `INVALID_REQUEST` | update | **422** | — | v0.1.0 | aktualizator odrzucił żądanie: zły/brak `tag`, ale też błąd po stronie agenta (log aktualizatora, start procesu) |
+| `INVALID_REQUEST` | update | **422** | — | v0.1.0 | zły/brak `tag` (od v0.8.0 także tag bez `v`); zła instancja (nieosiągalne — slug walidowany na starcie). Do v0.7.0 także błąd po stronie agenta — od v0.8.0 to `UPDATE_FAILED` |
+| `UPDATE_FAILED` | update | **500** | `reason`: string | v0.8.0 | aktualizator nie wystartował z winy agenta: log, blokada albo start procesu |
+| `UPDATE_IN_PROGRESS` | update | 409 | — | v0.8.0 | aktualizacja tej instancji trwa (lock aktualizatora) albo właśnie startuje (świeży znacznik startu) |
 | `BRIDGE_RESTARTING` | print-jobs | 503 | — | v0.1.0 | błąd odczytu magazynu idempotencji; rekord pending bez użytecznego `cups_job_id` |
 | `PRINT_UNCONFIRMED` | print-jobs | 409 | `original_fault`: string, `cups_job_id`: string | v0.4.1 | retry kluczem, którego zadanie przerwał fault sprzętowy |
 | `INVALID_PDF` | print-jobs | 422 | — | v0.1.0 | render nie powiódł się |
@@ -191,7 +213,7 @@ przyjść z kilku endpointów, z różnym HTTP i raz z `details`, raz bez.
 | `QUEUE_PAUSED` | print-jobs | 503 | `ipp_job_state`: number, `cups_job_id`: string | v0.1.0 | IPP: zadanie pending-held (wymaga zwolnienia przez operatora) |
 | `CUPS_UNAVAILABLE` | print-jobs | 503 | — | v0.1.0 | `lp` padło; zapytanie IPP padło; IPP: zadanie aborted |
 | `PRINT_TIMEOUT` | print-jobs | 503 | — | v0.1.0 | budżet potwierdzenia wyczerpany (CUPS albo ~HS wciąż drenuje); kontekst anulowany (budżet czasu serwera albo rozłączenie klienta) |
-| `PRINT_TIMEOUT` | printer-reset | 503 | — | v0.4.0 | anulowany kontekst w oczekiwaniu na panel — tylko po rozłączeniu klienta, więc w praktyce niewidoczny |
+| `PRINT_TIMEOUT` | printer-reset | 503 | `reset_sent`: boolean | v0.8.0 (bez `details`: v0.4.0–v0.7.0) | budżet czasu resetu wyczerpany albo klient się rozłączył, zanim panel rozstrzygnął wynik |
 | `PRINTER_OUT_OF_PAPER` | print-jobs | 503 | — | v0.1.0 | ~HS: brak papieru po wysłaniu |
 | `PRINTER_BUSY` | printer-reset | 409 | — | v0.4.0 | panel raportuje `Printing` |
 | `MISSING_TOKEN` | print-jobs, printer-reset, update | 401 | — | v0.1.0 (printer-reset: v0.4.0) | brak `X-Print-Token` |
@@ -210,6 +232,16 @@ Relacja kod → HTTP jest 1:1 z jednym wyjątkiem: `INVALID_REQUEST` ma 400
 - `PRINTER_OFFLINE` — `details` **tylko** z `printer-reset`, gdy po resecie
   panel raportuje fault: `panel_state` string (tekst z panelu, np.
   `"Paper Jam"`; **może być `""`**). Pozostałe emisje bez `details`.
+- `UPDATE_FAILED` (od v0.8.0) — `details` **zawsze**: `reason` string, jedna z
+  wartości: `log_unavailable` (log aktualizatora), `lock_unavailable` (blokada
+  albo znacznik startu w katalogu danych), `spawn_failed` (start procesu, także
+  błąd nieznany). `message` to stały tekst per `reason`, bez ścieżek; szczegół
+  jest tylko w logu agenta.
+- `PRINT_TIMEOUT` z `printer-reset` (od v0.8.0) — `details` **zawsze**:
+  `reset_sent` boolean. `true` = żądanie `func=reset` zostało rozpoczęte, więc
+  panel mógł je wykonać (sprawdź panel przed ponowieniem); `false` = na pewno
+  nie wysłano (np. budżet zjadło czekanie na inny reset). `PRINT_TIMEOUT` z
+  `print-jobs` — nigdy `details`.
 - Wszystkie inne kody: nigdy `details`.
 
 `cups_job_id` w `details` jest zawsze stringiem, a `ipp_job_state` zawsze liczbą.
@@ -217,16 +249,22 @@ Klient nie może zakładać, że dany kod zawsze ma albo zawsze nie ma `details`
 
 ## 3. Retry: automatyczny vs ręczny
 
-- **Retry automatyczny klienta = każdy 5xx.** Dziś każdy 5xx agenta to 503 z
-  kodem `Retryable() == true`. Ponawiaj **tym samym** `Idempotency-Key`: jeśli
-  zadanie zostało już wysłane do CUPS, agent je wznawia (resume-by-key) zamiast
-  wysyłać drugi raz, więc retry nie duplikuje etykiety.
+- **Retry automatyczny klienta = każdy 5xx na `print-jobs`.** Każdy 5xx z
+  `print-jobs` to 503 z kodem `Retryable() == true`. Ponawiaj **tym samym**
+  `Idempotency-Key`: jeśli zadanie zostało już wysłane do CUPS, agent je wznawia
+  (resume-by-key) zamiast wysyłać drugi raz, więc retry nie duplikuje etykiety.
 - **4xx = trwałe dla tego żądania** — nie ponawiaj automatycznie.
+- **Mutacje admin (`printer-reset`, `update`) nigdy nie są ponawiane
+  automatycznie** — mają skutek fizyczny albo restartują agenta, więc każdy ich
+  błąd (także 5xx: `UPDATE_FAILED` 500, `PRINT_TIMEOUT` 503 z resetu) to decyzja
+  operatora. Przy `UPDATE_IN_PROGRESS` (409) operator czeka na koniec bieżącej
+  aktualizacji (`health.version`) i ponawia, jeśli trzeba.
 - **`PRINTER_BUSY` (409, tylko `printer-reset`) — ponów ręcznie.** W Go
   `Retryable() == true` („spróbuj po zakończeniu druku”), ale reset ma skutek
   fizyczny i jest akcją operatora. Klient celowo **nie** ponawia go
   automatycznie: operator ponawia reset sam, gdy batch się skończy. To jedyny
-  kod, w którym `Retryable()` i retry automatyczny klienta się różnią.
+  kod, w którym `Retryable()` i retry automatyczny klienta się różnią
+  (`UPDATE_FAILED` i `UPDATE_IN_PROGRESS` mają `Retryable() == false`).
 - **`PRINT_UNCONFIRMED` (409) — nigdy automatycznie**, decyzja człowieka (§4).
 
 ## 4. `printed` i `PRINT_UNCONFIRMED`
@@ -272,7 +310,7 @@ agenta, więc tej klasy nie da się usunąć po stronie Go.
 | N4 | ukośnik na końcu (`/api/v1/print-jobs/`) z tokenem | 404 jak N1 | tak |
 | N5 | nieczysta ścieżka (`//api/v1/print-jobs`) z tokenem | 307, `Location: /api/v1/print-jobs`, puste body | tak |
 | N6 | **plain HTTP na port TLS** (`base_url` z `http://`) — realna pomyłka konfiguracji | `HTTP/1.0 400 Bad Request` **bez `Content-Type`**, body `Client sent an HTTP request to an HTTPS server.\n` | nie (zachowanie `http.Server`; wymaga sieci) |
-| N7 | panika w handlerze, przekroczony `WriteTimeout` (patologiczny reset, §1.3) | brak odpowiedzi — zerwane połączenie | nie (wymaga sieci) |
+| N7 | panika w handlerze, przekroczony `WriteTimeout` (do v0.7.0 także patologiczny reset; od v0.8.0 reset ma budżet, §1.3) | brak odpowiedzi — zerwane połączenie | nie (wymaga sieci) |
 | N8 | zniekształcone żądanie, nagłówki > 1 MiB | 400 / 431 `text/plain`, `Connection: close` | nie (wymaga sieci) |
 
 Uwaga: body > 20 MB to **nie** jest N8 — daje kopertę 400 `INVALID_REQUEST`
@@ -284,10 +322,11 @@ Uwaga: body > 20 MB to **nie** jest N8 — daje kopertę 400 `INVALID_REQUEST`
   klucz w `details`, nowy kod błędu, `details` przy kodzie, który go dotąd nie
   miał.
 - **Nowy kod błędu:** o zachowaniu klienta, który go jeszcze nie zna, decyduje
-  klasa HTTP — **5xx = przejściowy** (retry automatyczny tym samym kluczem),
-  **4xx = trwały**. HTTP nowego kodu musi więc odpowiadać jego semantyce. Nowy
-  kod dopisz do `apierr.go`, do tabel §2.1 i §2.2 oraz do tabeli przypadków
-  testu kontraktu (testy z §8 tego wymagają).
+  klasa HTTP — na `print-jobs` **5xx = przejściowy** (retry automatyczny tym
+  samym kluczem), **4xx = trwały**. Kody tylko z mutacji admin są zawsze
+  „ponów ręcznie”, niezależnie od klasy HTTP (§3). HTTP nowego kodu musi więc
+  odpowiadać jego semantyce. Nowy kod dopisz do `apierr.go`, do tabel §2.1 i
+  §2.2 oraz do tabeli przypadków testu kontraktu (testy z §8 tego wymagają).
 - **Zmiany łamiące** (wymagają skoordynowanego wydania z klientem): usunięcie
   albo zmiana nazwy pola sukcesu, zmiana typu pola (także w `details` i w
   health), zmiana wartości stałej (`"printed"`, `"reset_ok"`, `"Ready"`,
@@ -301,6 +340,17 @@ Uwaga: body > 20 MB to **nie** jest N8 — daje kopertę 400 `INVALID_REQUEST`
 ## 7. Wersje
 
 - Kontrakt na drucie: stały od **v0.4.1** do **v0.7.0** włącznie.
+- **v0.8.0** — tylko `update` i `printer-reset`:
+  - błąd po stronie agenta na `update`: 422 `INVALID_REQUEST` (message ze
+    ścieżką) → 500 `UPDATE_FAILED` z `details.reason`, message bez ścieżek;
+  - nowy 409 `UPDATE_IN_PROGRESS` (blokada aktualizacji per instancja; update
+    innej instancji czeka w aktualizatorze);
+  - tag bez `v`: 202 → 422 `INVALID_REQUEST`;
+  - reset ma budżet czasu (domyślnie 80 s): po nim 503 `PRINT_TIMEOUT` z
+    `details.reset_sent`; dotychczasowa emisja `PRINT_TIMEOUT` z resetu też
+    dostaje `details.reset_sent`. Reset, którego budżet minie przed
+    rozstrzygnięciem, a który dziś zdążyłby przed `WriteTimeout`, dostaje 503
+    zamiast 200.
 - Agent < v0.4.0: brak `printer-reset` (żądanie daje N1 — 404 `text/plain`),
   brak `PRINTER_BUSY`, `watchdog_*` w health i `details.panel_state`.
 - Agent < v0.4.1: brak `PRINT_UNCONFIRMED` (§4).
@@ -310,14 +360,18 @@ Uwaga: body > 20 MB to **nie** jest N8 — daje kopertę 400 `INVALID_REQUEST`
 
 - `internal/server/contract_test.go` — „golden” przez `Router()` z prawdziwym
   `TokenAuth` i prawdziwymi producentami błędów (`printer.Printer`,
-  `printer.PrinterResetter` z `printer.WebPanel`, `update.SpawnUpdater`) nad
-  atrapami CUPS/~HS/panelu: status, `Content-Type`, pełne body jako zdekodowana
+  `printer.PrinterResetter` z `printer.WebPanel`, `update.Spawner`) nad
+  atrapami CUPS/~HS/panelu/sudo: status, `Content-Type`, pełne body jako zdekodowana
   struktura z typami, bajty replayu, odpowiedzi bez koperty N1–N5. Tabela
   przypadków pokrywa każdy kod z `apierr.go`.
 - `internal/server/contract_doc_test.go` — spójność tego dokumentu z kodem:
-  §2.1 (zbiór kodów, `Retryable()`, retry automatyczny = 5xx), §2.2 (wiersze =
-  emisje z tabeli przypadków), §1.1/§1.3/§1.4 (pola, typy, stałe).
+  §2.1 (zbiór kodów, `Retryable()`, retry automatyczny ⇔ kod ma emisje na
+  `print-jobs` i wszystkie są 5xx), §2.2 (wiersze = emisje z tabeli przypadków),
+  §1.1/§1.3/§1.4 (pola, typy, stałe).
 - `cmd/print-bridge/contract_health_test.go` — health przez `Router()` z
   prawdziwym `makeHealth`: pełne body, bajty `"version":"X.Y.Z"` czytane przez
   `deploy/update-bridge.sh`, spójność z tabelą §1.2.
-- `internal/apierr/apierr_test.go` — `Retryable()` dla wszystkich 14 kodów.
+- `internal/apierr/apierr_test.go` — `Retryable()` dla wszystkich 16 kodów.
+- `internal/update/lock_contract_test.go` — blokada aktualizacji: te same
+  ścieżki i kolejność kroków w Go i `deploy/update-bridge.sh`, zachowanie bloku
+  locka na prawdziwym `bash` + `flock` (gdy dostępne).

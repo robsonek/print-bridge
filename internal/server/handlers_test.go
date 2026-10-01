@@ -482,3 +482,25 @@ func TestRetryAfterTimeoutStillResumesNormally(t *testing.T) {
 		t.Errorf("ResumeJob = %d wywołań, want 1 (normalny resume)", fp.resumeCalls.Load())
 	}
 }
+
+// U3 (od v0.8.0): reset dostaje kontekst z budżetem ResetTimeout — inaczej
+// patologiczny reset przekraczał WriteTimeout, a klient (PHP retry na
+// ConnectionException) wysyłał func=reset ponownie.
+func TestAdminPrinterResetAppliesBudget(t *testing.T) {
+	var deadline time.Time
+	var hasDeadline bool
+	h := &Handlers{
+		ResetTimeout: 80 * time.Second,
+		Resetter: func(ctx context.Context) (printer.ResetOutcome, *apierr.Error) {
+			deadline, hasDeadline = ctx.Deadline()
+			return printer.ResetOutcome{PanelAfter: "Ready"}, nil
+		},
+	}
+	h.AdminPrinterReset(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/v1/admin/printer-reset", nil))
+	if !hasDeadline {
+		t.Fatal("Resetter musi dostać ctx z deadline'em (budżet resetu)")
+	}
+	if until := time.Until(deadline); until <= 0 || until > h.ResetTimeout+time.Second {
+		t.Errorf("deadline za %v, want ≤ %v", until, h.ResetTimeout)
+	}
+}
