@@ -6,7 +6,9 @@ import (
 )
 
 func TestRetryableClassification(t *testing.T) {
-	retry := []Code{CodeCUPSUnavailable, CodePrinterOffline, CodeOutOfPaper, CodeQueuePaused, CodePrintTimeout, CodeBridgeRestarting}
+	// PRINTER_BUSY: Retryable() w Go, choć klient ponawia go RĘCZNIE (409 tylko
+	// z resetu) — docs/error-contract.md §3.
+	retry := []Code{CodeCUPSUnavailable, CodePrinterOffline, CodeOutOfPaper, CodeQueuePaused, CodePrintTimeout, CodeBridgeRestarting, CodePrinterBusy}
 	for _, c := range retry {
 		if !c.Retryable() {
 			t.Errorf("%s should be retryable", c)
