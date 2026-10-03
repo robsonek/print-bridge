@@ -157,6 +157,10 @@ type contractWorld struct {
 	panel      *panelTransport
 	resetProbe *contractBackend
 	resetPoll  time.Duration
+	// render/sub: prawdziwe źródła zamiast atrapy w.be (testy wycieku
+	// tekstu z zewnątrz do message, message_leak_test.go); nil = w.be.
+	render printer.Renderer
+	sub    printer.Submitter
 	// spawner: PRAWDZIWY update.Spawner (lock, znacznik, log) w katalogu
 	// danych z TempDir; za sudo podstawka, która tylko kończy się sukcesem.
 	spawner *update.Spawner
@@ -218,6 +222,12 @@ func (w *contractWorld) router() http.Handler {
 	p := &printer.Printer{
 		Reach: w.be, Sub: w.be, Poll: w.be, Probe: w.be, Render: w.be,
 		ConfirmTimeoutPolls: 3,
+	}
+	if w.render != nil {
+		p.Render = w.render
+	}
+	if w.sub != nil {
+		p.Sub = w.sub
 	}
 	rs := &printer.PrinterResetter{
 		Panel:        &printer.WebPanel{BaseURL: panelBaseURL, HTTPC: &http.Client{Transport: w.panel}},
@@ -282,6 +292,10 @@ func resetCase(name string) contractCase {
 func updateCase(name, body string) contractCase {
 	return contractCase{name: name, method: http.MethodPost, path: "/api/v1/admin/update", token: contractToken, body: body}
 }
+
+// panelFaultMsg: od v0.9.0 stan panelu jest tylko w details.panel_state —
+// message go nie powtarza (tekst z zewnątrz, spec message-bez-wyjscia).
+const panelFaultMsg = "po resecie panel raportuje fault (stan w details.panel_state)"
 
 func envelope(code, msg string) map[string]any {
 	return map[string]any{"code": code, "message": msg}
@@ -404,7 +418,7 @@ func contractCases() []contractCase {
 		with(printCase("pdf-nie-renderuje"), func(c *contractCase) {
 			c.body = labelBody("%PDF-1.4 uszkodzony")
 			c.arrange = func(w *contractWorld) { w.be.renderErr = errors.New("pdftoppm: exit status 1") }
-			c.status, c.want = 422, envelope("INVALID_PDF", "PDF render failed: pdftoppm: exit status 1")
+			c.status, c.want = 422, envelope("INVALID_PDF", "PDF render failed")
 		}),
 		with(printCase("ani-pdf-ani-zpl"), func(c *contractCase) {
 			c.body = labelBody("garbage")
@@ -426,7 +440,7 @@ func contractCases() []contractCase {
 		}),
 		with(printCase("hs-milczy-w-budzecie"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) { w.be.hs = []hsReply{{err: errors.New("i/o timeout")}} }
-			c.status, c.want = 503, envelope("PRINTER_OFFLINE", "printer unreachable during ~HS verification: i/o timeout")
+			c.status, c.want = 503, envelope("PRINTER_OFFLINE", "printer unreachable during ~HS verification")
 		}),
 
 		// --- print-jobs: QUEUE_PAUSED 503 (bez i z details) ---
@@ -447,11 +461,11 @@ func contractCases() []contractCase {
 		// --- print-jobs: CUPS_UNAVAILABLE 503 ---
 		with(printCase("lp-padlo"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) { w.be.submitErr = errors.New("lp: scheduler not responding") }
-			c.status, c.want = 503, envelope("CUPS_UNAVAILABLE", "lp submit failed: lp: scheduler not responding")
+			c.status, c.want = 503, envelope("CUPS_UNAVAILABLE", "lp submit failed")
 		}),
 		with(printCase("ipp-padlo"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) { w.be.stateErr = errors.New("ipp: connection refused") }
-			c.status, c.want = 503, envelope("CUPS_UNAVAILABLE", "job poll failed: ipp: connection refused")
+			c.status, c.want = 503, envelope("CUPS_UNAVAILABLE", "job poll failed")
 		}),
 		with(printCase("cups-przerwal"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) { w.be.states = []int{printer.JobAborted} }
@@ -511,11 +525,11 @@ func contractCases() []contractCase {
 		// --- printer-reset: PRINTER_OFFLINE 503 (bez i z details) ---
 		with(resetCase("reset-panel-niedostepny"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) { w.panel.status = []panelPage{{code: http.StatusServiceUnavailable}} }
-			c.status, c.want = 503, envelope("PRINTER_OFFLINE", "panel drukarki (status.cgi) niedostępny: panel /cgi-bin/status.cgi: HTTP 503")
+			c.status, c.want = 503, envelope("PRINTER_OFFLINE", "panel drukarki (status.cgi) niedostępny: HTTP 503")
 		}),
 		with(resetCase("reset-func-reset-padl"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) { w.panel.resetCode = http.StatusInternalServerError }
-			c.status, c.want = 503, envelope("PRINTER_OFFLINE", "func=reset nie powiódł się: panel /admin/cgi-bin/function.cgi?func=reset: HTTP 500")
+			c.status, c.want = 503, envelope("PRINTER_OFFLINE", "func=reset nie powiódł się: HTTP 500")
 		}),
 		with(resetCase("reset-panel-nie-wrocil-do-ready"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) {
@@ -525,14 +539,14 @@ func contractCases() []contractCase {
 		}),
 		with(resetCase("reset-fault-po-resecie"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) { w.panel.status = []panelPage{panelHTML("redtext", "Paper Jam")} }
-			c.status, c.want = 503, envelopeDetails("PRINTER_OFFLINE", "po resecie panel raportuje fault: Paper Jam",
+			c.status, c.want = 503, envelopeDetails("PRINTER_OFFLINE", panelFaultMsg,
 				map[string]any{"panel_state": "Paper Jam"})
 		}),
 		with(resetCase("reset-fault-pusty-stan"), func(c *contractCase) {
 			c.arrange = func(w *contractWorld) {
 				w.panel.status = []panelPage{panelHTML("greentext", "Ready"), panelHTML("redtext", " ")}
 			}
-			c.status, c.want = 503, envelopeDetails("PRINTER_OFFLINE", "po resecie panel raportuje fault: ",
+			c.status, c.want = 503, envelopeDetails("PRINTER_OFFLINE", panelFaultMsg,
 				map[string]any{"panel_state": ""})
 		}),
 

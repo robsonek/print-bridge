@@ -3,6 +3,7 @@ package printer
 import (
 	"context"
 	"errors"
+	"log"
 	"strconv"
 	"time"
 
@@ -49,7 +50,9 @@ func (p *Printer) Print(ctx context.Context, data []byte, copies int) (Result, *
 	case FormatPDF:
 		zpl, err := p.Render.PDFToZPL(ctx, data)
 		if err != nil {
-			return Result{}, apierr.New(apierr.CodeInvalidPDF, "PDF render failed: "+err.Error(), 422)
+			// Od v0.9.0 pełny błąd (wyjście pdfinfo/pdftoppm cytuje dokument) tylko w logu.
+			log.Printf("print: PDF render failed: %v", err)
+			return Result{}, apierr.New(apierr.CodeInvalidPDF, publicMessage("PDF render failed", err), 422)
 		}
 		data = zpl
 	default:
@@ -65,7 +68,8 @@ func (p *Printer) Print(ctx context.Context, data []byte, copies int) (Result, *
 
 	jobID, err := p.Sub.Submit(ctx, data, copies)
 	if err != nil {
-		return Result{}, apierr.New(apierr.CodeCUPSUnavailable, "lp submit failed: "+err.Error(), 503)
+		log.Printf("print: lp submit failed: %v", err)
+		return Result{}, apierr.New(apierr.CodeCUPSUnavailable, publicMessage("lp submit failed", err), 503)
 	}
 
 	// Scale the confirm budget by label count: a multi-parcel job prints serially
@@ -94,7 +98,8 @@ func (p *Printer) pollAndVerify(ctx context.Context, jobID, maxPolls int) (Resul
 			if errors.Is(err, ErrJobGone) {
 				return p.verify(ctx, jobID, maxPolls-i-1)
 			}
-			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, "job poll failed: "+err.Error(), 503)
+			log.Printf("print: job %d poll failed: %v", jobID, err)
+			return Result{CUPSJobID: id}, apierr.New(apierr.CodeCUPSUnavailable, publicMessage("job poll failed", err), 503)
 		}
 		// RFC 8011 §5.3.7: only completed / canceled / aborted are TERMINATING
 		// states. processing-stopped (6) is non-terminal => keep polling: (#1) the
@@ -177,7 +182,7 @@ func (p *Printer) verify(ctx context.Context, jobID, budget int) (Result, *apier
 		// gdyby Healthy() dostało nowy fault bez własnego case'a (wtedy
 		// TestVerifyEveryHealthyFaultHasDedicatedCase każe ten case dopisać).
 		case !hs.Healthy():
-			return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline, "printer fault (~HS): "+hs.Raw, 503)
+			return Result{CUPSJobID: id}, hsFaultError(jobID, hs)
 
 		// Drained: no formats waiting, no labels remaining -> physically printed.
 		case !hs.Draining():
@@ -195,11 +200,18 @@ func (p *Printer) verify(ctx context.Context, jobID, budget int) (Result, *apier
 		}
 	}
 	if !answered && lastErr != nil {
-		return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline,
-			"printer unreachable during ~HS verification: "+lastErr.Error(), 503)
+		log.Printf("print: job %d no ~HS answer within budget: %v", jobID, lastErr)
+		return Result{CUPSJobID: id}, apierr.New(apierr.CodePrinterOffline, "printer unreachable during ~HS verification", 503)
 	}
 	return Result{CUPSJobID: id}, apierr.New(apierr.CodePrintTimeout,
 		"labels still printing (~HS draining) at confirm budget; retry with the same Idempotency-Key re-verifies", 503)
+}
+
+// hsFaultError: koperta bezpiecznika U4 (fault w Healthy() bez własnego
+// case'a). Surowa linia ~HS to tekst drukarki — od v0.9.0 tylko w logu.
+func hsFaultError(jobID int, hs HostStatus) *apierr.Error {
+	log.Printf("print: job %d ~HS fault (U4): %q", jobID, hs.Raw)
+	return apierr.New(apierr.CodePrinterOffline, "printer fault (~HS)", 503)
 }
 
 // ResumeJob continues polling an already-submitted job (resume-by-key path). It

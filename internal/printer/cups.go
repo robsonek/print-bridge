@@ -52,7 +52,7 @@ var jobIDRe = regexp.MustCompile(`request id is \S+-(\d+)`)
 func parseJobID(lpOutput string) (int, error) {
 	m := jobIDRe.FindStringSubmatch(lpOutput)
 	if m == nil {
-		return 0, fmt.Errorf("no job id in lp output: %q", lpOutput)
+		return 0, withPublic("no job id in lp output", fmt.Errorf("no job id in lp output: %q", lpOutput))
 	}
 	return strconv.Atoi(m[1])
 }
@@ -81,7 +81,7 @@ func (c *CUPSClient) Submit(ctx context.Context, data []byte, copies int) (int, 
 	cmd.Stdin = bytes.NewReader(payload)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("lp failed: %v: %s", err, out)
+		return 0, withPublic(toolOutcome("lp", err), fmt.Errorf("lp failed: %v: %s", err, out))
 	}
 	return parseJobID(string(out))
 }
@@ -119,7 +119,7 @@ func (c *CUPSClient) JobState(ctx context.Context, jobID int) (int, error) {
 			}
 		}
 	}
-	return 0, fmt.Errorf("job-state not found in IPP response")
+	return 0, ownErrorf("job-state not found in IPP response")
 }
 
 // PrinterReasons queries IPP Get-Printer-Attributes for printer-state-reasons.
@@ -159,13 +159,13 @@ func (c *CUPSClient) doIPP(ctx context.Context, req *goipp.Message) (*goipp.Mess
 	httpReq.Header.Set("Content-Type", "application/ipp")
 	httpResp, err := c.httpc.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, withPublic("IPP transport error", err) // url.Error cytuje URL kolejki
 	}
 	defer httpResp.Body.Close()
 
 	var resp goipp.Message
 	if err := resp.Decode(httpResp.Body); err != nil {
-		return nil, err
+		return nil, withPublic("invalid IPP response", err)
 	}
 	// #6: the IPP response status lives in resp.Code (goipp: "Operation for
 	// request, status for response"). Decode populates it even on error
@@ -193,6 +193,8 @@ func checkIPPStatus(resp *goipp.Message) error {
 	case goipp.StatusOk, goipp.StatusOkIgnoredOrSubstituted, goipp.StatusOkConflicting:
 		return nil
 	default:
-		return fmt.Errorf("IPP error 0x%04x %s", uint16(resp.Code), st)
+		// Publicznie sam kod liczbowy; nazwa statusu tylko w Error() (log, health).
+		return withPublic(fmt.Sprintf("IPP error 0x%04x", uint16(resp.Code)),
+			fmt.Errorf("IPP error 0x%04x %s", uint16(resp.Code), st))
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/robsonek/print-bridge/internal/apierr"
@@ -569,7 +568,7 @@ func TestVerifyEveryHealthyFaultHasDedicatedCase(t *testing.T) {
 				Print(context.Background(), []byte("^XA^XZ"), 1)
 			if e == nil {
 				t.Errorf("%s=%v: Healthy()==false, a verify() zwróciło printed", typ.Field(i).Name, v)
-			} else if strings.HasPrefix(e.Message, "printer fault (~HS): ") {
+			} else if e.Message == "printer fault (~HS)" {
 				t.Errorf("%s=%v: obsłużone przez bezpiecznik — dodaj dedykowany case w verify()", typ.Field(i).Name, v)
 			}
 		}
