@@ -1,10 +1,12 @@
 # Kontrakt HTTP print-bridge (v2)
 
-Opisuje to, co agent **v0.8.0** wysyła na drucie. Kontrakt był identyczny od
+Opisuje to, co agent **v0.9.0** wysyła na drucie. Kontrakt był identyczny od
 **v0.4.1** do **v0.7.0** (w `v0.4.1..v0.7.0` nie zmieniła się żadna emisja
 `apierr.New`/`WithDetail`, żaden kształt sukcesu ani tag JSON); v0.8.0 zmienia
-odpowiedzi `update` i `printer-reset` — każda zmiana jest oznaczona „od v0.8.0”,
-a lista jest w §7. Kolumna „Od wersji” mówi, od którego wydania obowiązuje dany
+odpowiedzi `update` i `printer-reset` — każda zmiana jest oznaczona „od v0.8.0”;
+v0.9.0 zmienia wyłącznie treść `message` (bez wyjścia narzędzi i tekstu systemów
+zewnętrznych, §2) — kody, HTTP, `details` i kształty sukcesu bez zmian. Lista
+zmian per wersja jest w §7. Kolumna „Od wersji” mówi, od którego wydania obowiązuje dany
 element (`git tag --contains` commitu, który go wprowadził).
 
 Dokument jest przypięty testami (§8): zbiór kodów, retryowalność, mapa kod →
@@ -154,6 +156,17 @@ Inwarianty:
 - `message` — string, niepusty tekst dla człowieka. **Nie do parsowania**: treść
   może się zmieniać i bywa techniczna. Od v0.8.0 odpowiedzi `update` nie
   zawierają ścieżek lokalnych (do v0.7.0 422 na `update` potrafił je zawierać).
+  **Od v0.9.0** `message` nie zawiera wyjścia narzędzi (`pdfinfo`, `pdftoppm`,
+  `lp`) ani tekstu systemów zewnętrznych (błędy IPP/CUPS, sieci, panelu i `~HS`
+  drukarki): to stały literał agenta + narzędzie/operacja + kod (kod wyjścia,
+  status IPP, status HTTP panelu, np. `PDF render failed: pdfinfo exited with
+  code 1`) albo stała klasa błędu (np. `job poll failed: IPP transport error`,
+  a dla błędu bez opisanej klasy — sam literał, np. `lp submit failed`). Liczby
+  w literałach agenta (strona, wymiary z guardu MediaBox, liczba prób) zostają.
+  Pełny błąd jest wyłącznie w logu agenta (journald). Do v0.8.0 `message` z
+  `print-jobs` i `printer-reset` potrafił nieść surowe wyjście narzędzi — także
+  fragmenty dokumentu (np. nazwę filtru z PDF w komunikacie `pdfinfo`) — oraz
+  tekst błędów IPP, sieci (z adresem drukarki) i panelu.
 - `details` — **albo nieobecne, albo niepusty obiekt** (nigdy `{}` ani `null`).
   Klucze i typy per kod: §2.3.
 - Innych kluczy nie ma (status HTTP nie jest serializowany do body).
@@ -231,7 +244,9 @@ Relacja kod → HTTP jest 1:1 z jednym wyjątkiem: `INVALID_REQUEST` ma 400
   zawsze `"PRINTER_OUT_OF_PAPER"`), `cups_job_id` string (niepusty ciąg cyfr).
 - `PRINTER_OFFLINE` — `details` **tylko** z `printer-reset`, gdy po resecie
   panel raportuje fault: `panel_state` string (tekst z panelu, np.
-  `"Paper Jam"`; **może być `""`**). Pozostałe emisje bez `details`.
+  `"Paper Jam"`; **może być `""`**). To tekst firmware'u print-servera, nie
+  dokumentu. Od v0.9.0 `message` tej emisji go nie powtarza (stały tekst
+  „… (stan w details.panel_state)”). Pozostałe emisje bez `details`.
 - `UPDATE_FAILED` (od v0.8.0) — `details` **zawsze**: `reason` string, jedna z
   wartości: `log_unavailable` (log aktualizatora), `lock_unavailable` (blokada
   albo znacznik startu w katalogu danych), `spawn_failed` (start procesu, także
@@ -351,6 +366,24 @@ Uwaga: body > 20 MB to **nie** jest N8 — daje kopertę 400 `INVALID_REQUEST`
     dostaje `details.reset_sent`. Reset, którego budżet minie przed
     rozstrzygnięciem, a który dziś zdążyłby przed `WriteTimeout`, dostaje 503
     zamiast 200.
+- **v0.9.0** — wyłącznie treść `message` (§2): bez wyjścia `pdfinfo`/`pdftoppm`/
+  `lp` i bez tekstu IPP, sieci, panelu i `~HS`. Przykłady przed → po:
+  - `PDF render failed: pdfinfo failed (invalid PDF?): exit status 1: Syntax
+    Error: …` → `PDF render failed: pdfinfo exited with code 1`;
+  - `lp submit failed: lp failed: exit status 2: …` → `lp submit failed: lp
+    exited with code 2`;
+  - `job poll failed: Post "http://localhost:631/…": dial tcp …` → `job poll
+    failed: IPP transport error`;
+  - `printer unreachable during ~HS verification: dial tcp <IP>:9100: …` →
+    `printer unreachable during ~HS verification`;
+  - `panel drukarki (status.cgi) niedostępny: panel /cgi-bin/status.cgi: HTTP
+    503` → `panel drukarki (status.cgi) niedostępny: HTTP 503`;
+  - `po resecie panel raportuje fault: Paper Jam` → `po resecie panel raportuje
+    fault (stan w details.panel_state)`.
+  Kody, HTTP, `Retryable()`, `details` i kształty sukcesu bez zmian. Poza tą
+  zmianą zostają (tekst firmware'u/CUPS, nie dokumentu): `details.panel_state`,
+  `panel_before` w 200 resetu oraz pola health `reach_error`, `host_status`,
+  `host_status_2`, `host_status_error`, `cups_reasons`, `cups_error`.
 - Agent < v0.4.0: brak `printer-reset` (żądanie daje N1 — 404 `text/plain`),
   brak `PRINTER_BUSY`, `watchdog_*` w health i `details.panel_state`.
 - Agent < v0.4.1: brak `PRINT_UNCONFIRMED` (§4).
@@ -372,6 +405,13 @@ Uwaga: body > 20 MB to **nie** jest N8 — daje kopertę 400 `INVALID_REQUEST`
   prawdziwym `makeHealth`: pełne body, bajty `"version":"X.Y.Z"` czytane przez
   `deploy/update-bridge.sh`, spójność z tabelą §1.2.
 - `internal/apierr/apierr_test.go` — `Retryable()` dla wszystkich 16 kodów.
+- `internal/printer/message_leak_test.go`, `internal/printer/hsfault_test.go`,
+  `internal/printer/publicerr_test.go`, `internal/server/message_leak_test.go` —
+  od v0.9.0: `message` bez wyjścia narzędzi i tekstu systemów zewnętrznych.
+  Każde źródło (fałszywe `pdfinfo`/`pdftoppm`/`lp` w `PATH`, `httptest`,
+  `RoundTripper`, także prawdziwy `pdfinfo` przez `Router()`) dostaje znacznik;
+  test sprawdza brak znacznika w kopercie, kod, HTTP, dokładny `message` i
+  pełny błąd w logu agenta; `details.panel_state` bez zmian.
 - `internal/update/lock_contract_test.go` — blokada aktualizacji: te same
   ścieżki i kolejność kroków w Go i `deploy/update-bridge.sh`, zachowanie bloku
   locka na prawdziwym `bash` + `flock` (gdy dostępne).

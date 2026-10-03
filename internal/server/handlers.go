@@ -280,8 +280,14 @@ var updateFailedMessages = map[string]string{
 // wszystko inne (także nieznany błąd) → 500 UPDATE_FAILED z details.reason.
 func updateError(err error) *apierr.Error {
 	switch {
-	case errors.Is(err, update.ErrInvalidTag), errors.Is(err, update.ErrInvalidInstance):
-		return apierr.New(apierr.CodeInvalidRequest, err.Error(), http.StatusUnprocessableEntity)
+	// Od v0.9.0 message to tekst SENTINELA, nie err — opakowanie mogłoby
+	// nieść tekst spoza stałych (szczegół tylko w logu agenta).
+	case errors.Is(err, update.ErrInvalidTag):
+		log.Printf("admin/update: rejected: %v", err)
+		return apierr.New(apierr.CodeInvalidRequest, update.ErrInvalidTag.Error(), http.StatusUnprocessableEntity)
+	case errors.Is(err, update.ErrInvalidInstance):
+		log.Printf("admin/update: rejected: %v", err)
+		return apierr.New(apierr.CodeInvalidRequest, update.ErrInvalidInstance.Error(), http.StatusUnprocessableEntity)
 	case errors.Is(err, update.ErrInProgress):
 		return apierr.New(apierr.CodeUpdateInProgress,
 			"aktualizacja agenta już trwa (albo właśnie startuje) — poczekaj na jej koniec (health.version) i ponów ręcznie, jeśli trzeba",

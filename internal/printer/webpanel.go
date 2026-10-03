@@ -51,13 +51,17 @@ func (w *WebPanel) get(ctx context.Context, path string) ([]byte, error) {
 	}
 	resp, err := w.httpc().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, withPublic("brak połączenia z panelem", err) // url.Error cytuje URL panelu
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("panel %s: HTTP %d", path, resp.StatusCode)
+		return nil, withPublic(fmt.Sprintf("HTTP %d", resp.StatusCode), fmt.Errorf("panel %s: HTTP %d", path, resp.StatusCode))
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, withPublic("przerwany odczyt odpowiedzi panelu", err)
+	}
+	return body, nil
 }
 
 // Status fetches and parses status.cgi.

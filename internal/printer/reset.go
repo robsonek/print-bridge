@@ -3,6 +3,7 @@ package printer
 import (
 	"context"
 	"errors"
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -114,8 +115,9 @@ func (r *PrinterResetter) Reset(ctx context.Context) (ResetOutcome, *apierr.Erro
 		if ctx.Err() != nil {
 			return ResetOutcome{}, timeoutError(ctx, false)
 		}
+		log.Printf("reset: panel status.cgi niedostępny: %v", err)
 		return ResetOutcome{}, apierr.New(apierr.CodePrinterOffline,
-			"panel drukarki (status.cgi) niedostępny: "+err.Error(), 503)
+			publicMessage("panel drukarki (status.cgi) niedostępny", err), 503)
 	}
 	if before.Printing() {
 		return ResetOutcome{}, apierr.New(apierr.CodePrinterBusy,
@@ -129,8 +131,9 @@ func (r *PrinterResetter) Reset(ctx context.Context) (ResetOutcome, *apierr.Erro
 		if ctx.Err() != nil {
 			return ResetOutcome{}, timeoutError(ctx, true)
 		}
+		log.Printf("reset: func=reset nie powiódł się: %v", err)
 		return ResetOutcome{}, apierr.New(apierr.CodePrinterOffline,
-			"func=reset nie powiódł się: "+err.Error(), 503)
+			publicMessage("func=reset nie powiódł się", err), 503)
 	}
 
 	out := ResetOutcome{PanelBefore: before.State}
@@ -159,8 +162,10 @@ func (r *PrinterResetter) Reset(ctx context.Context) (ResetOutcome, *apierr.Erro
 			return out, nil
 		}
 		if st.Fault() {
+			// Od v0.9.0 tekst panelu tylko w details.panel_state (kontrakt) i logu.
+			log.Printf("reset: po resecie panel raportuje fault: %q", st.State)
 			return out, apierr.New(apierr.CodePrinterOffline,
-				"po resecie panel raportuje fault: "+st.State, 503).
+				"po resecie panel raportuje fault (stan w details.panel_state)", 503).
 				WithDetail("panel_state", st.State)
 		}
 		if ctx.Err() != nil { // niekońcowy stan, a czas minął

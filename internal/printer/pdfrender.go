@@ -119,17 +119,17 @@ func (r *PDFRenderer) PDFToZPL(ctx context.Context, pdf []byte) ([]byte, error) 
 		// only page 1, which let an "A6 cover + A4 body" PDF slip past the guard.
 		info, err := exec.CommandContext(ctx, "pdfinfo", "-f", "1", "-l", "-1", in).CombinedOutput()
 		if err != nil {
-			return nil, fmt.Errorf("pdfinfo failed (invalid PDF?): %v: %s", err, info)
+			return nil, withPublic(toolOutcome("pdfinfo", err), fmt.Errorf("pdfinfo failed (invalid PDF?): %v: %s", err, info))
 		}
 		geoms = parsePageGeoms(info)
 		if len(geoms) == 0 {
-			return nil, fmt.Errorf("pdfinfo: no Page size (invalid PDF?)")
+			return nil, ownErrorf("pdfinfo: no Page size (invalid PDF?)")
 		}
 		// The per-page render below trusts this enumeration; a mismatch would
 		// silently drop pages (#7), so refuse instead.
 		if m := pageCountRE.FindSubmatch(info); m != nil {
 			if n, _ := strconv.Atoi(string(m[1])); n != len(geoms) {
-				return nil, fmt.Errorf("pdfinfo reports %d pages but enumerated %d (invalid PDF?)", n, len(geoms))
+				return nil, ownErrorf("pdfinfo reports %d pages but enumerated %d (invalid PDF?)", n, len(geoms))
 			}
 		}
 		limit := 1.4 * float64(r.opt.WidthMM)
@@ -141,7 +141,7 @@ func (r *PDFRenderer) PDFToZPL(ctx context.Context, pdf []byte) ([]byte, error) 
 			case h <= limit: // landscape wider than the roll: turn 90°, print full-size
 				rotate[i] = true
 			default:
-				return nil, fmt.Errorf("PDF page %d is %.0fx%.0fmm, exceeding the %dmm roll in both orientations — MediaBox likely A4 not A6 (allegro-api#10120)", i+1, w, h, r.opt.WidthMM)
+				return nil, ownErrorf("PDF page %d is %.0fx%.0fmm, exceeding the %dmm roll in both orientations — MediaBox likely A4 not A6 (allegro-api#10120)", i+1, w, h, r.opt.WidthMM)
 			}
 		}
 	}
@@ -172,14 +172,14 @@ func (r *PDFRenderer) PDFToZPL(ctx context.Context, pdf []byte) ([]byte, error) 
 		// label+summary PDF emits one label each, never silently dropping pages.
 		args := []string{"-png", "-scale-to-x", strconv.Itoa(r.opt.RenderWidthDots), "-scale-to-y", "-1", in, outPrefix}
 		if out, err := exec.CommandContext(ctx, "pdftoppm", args...).CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("pdftoppm failed: %v: %s", err, out)
+			return nil, withPublic(toolOutcome("pdftoppm", err), fmt.Errorf("pdftoppm failed: %v: %s", err, out))
 		}
 		found, err := filepath.Glob(outPrefix + "-*.png")
 		if err != nil {
 			return nil, err
 		}
 		if len(found) == 0 {
-			return nil, fmt.Errorf("pdftoppm produced no png")
+			return nil, ownErrorf("pdftoppm produced no png")
 		}
 		// Sort NUMERICALLY by trailing -N (pdftoppm zero-pads to page-count width);
 		// a lexical sort would misorder once N >= 10.
@@ -204,14 +204,15 @@ func (r *PDFRenderer) PDFToZPL(ctx context.Context, pdf []byte) ([]byte, error) 
 			}
 			args = append(args, in, prefix)
 			if out, err := exec.CommandContext(ctx, "pdftoppm", args...).CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("pdftoppm failed on page %d: %v: %s", i+1, err, out)
+				return nil, withPublic(fmt.Sprintf("%s (page %d)", toolOutcome("pdftoppm", err), i+1),
+					fmt.Errorf("pdftoppm failed on page %d: %v: %s", i+1, err, out))
 			}
 			found, err := filepath.Glob(prefix + "-*.png")
 			if err != nil {
 				return nil, err
 			}
 			if len(found) != 1 {
-				return nil, fmt.Errorf("pdftoppm produced %d pngs for page %d, want 1", len(found), i+1)
+				return nil, ownErrorf("pdftoppm produced %d pngs for page %d, want 1", len(found), i+1)
 			}
 			pages = append(pages, rasterPage{path: found[0], turned: turned})
 		}
@@ -225,7 +226,7 @@ func (r *PDFRenderer) PDFToZPL(ctx context.Context, pdf []byte) ([]byte, error) 
 		}
 		img, _, err := image.Decode(bytes.NewReader(b))
 		if err != nil {
-			return nil, fmt.Errorf("decode %s: %w", filepath.Base(p.path), err)
+			return nil, withPublic("raster decode failed", fmt.Errorf("decode %s: %w", filepath.Base(p.path), err))
 		}
 		if p.turned {
 			img = rotate90CW(img)
